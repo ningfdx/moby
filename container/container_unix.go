@@ -298,6 +298,10 @@ func (container *Container) UpdateContainer(hostConfig *containertypes.HostConfi
 		return conflictingUpdateOptions("Conflicting options: CPU Quota cannot be updated as NanoCPUs has already been set")
 	}
 
+	if len(resources.DeviceRequests) > 0 {
+		cResources.DeviceRequests = resources.DeviceRequests
+	}
+
 	if resources.BlkioWeight != 0 {
 		cResources.BlkioWeight = resources.BlkioWeight
 	}
