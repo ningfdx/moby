@@ -5,7 +5,9 @@ package container // import "github.com/docker/docker/container"
 import (
 	"io/ioutil"
 	"os"
+	"path"
 	"path/filepath"
+	"strings"
 	"syscall"
 
 	"github.com/containerd/continuity/fs"
@@ -300,6 +302,30 @@ func (container *Container) UpdateContainer(hostConfig *containertypes.HostConfi
 
 	if len(resources.DeviceRequests) > 0 {
 		cResources.DeviceRequests = resources.DeviceRequests
+	}
+
+	if len(resources.Devices) > 0 {
+		for _, v := range resources.Devices {
+			// root path is not permit to mount
+			if len(v.PathInContainer) == 0 || v.PathOnHost == "/"{
+				continue
+			}
+
+			// if pathOnHost is nil, we'll delete this mount path in container
+			if  len(v.PathOnHost) == 0 {
+				delete(container.MountPoints, v.PathInContainer)
+				continue
+			}
+
+			container.MountPoints[v.PathInContainer] = &volumemounts.MountPoint{
+				Source:      v.PathOnHost,
+				Destination: path.Clean(filepath.ToSlash(v.PathInContainer)),
+				RW:          strings.ToLower(v.CgroupPermissions) == "rw",
+				Type:        mounttypes.TypeBind,
+				Mode:        "",
+				Propagation: mounttypes.PropagationRPrivate,
+			}
+		}
 	}
 
 	if resources.BlkioWeight != 0 {

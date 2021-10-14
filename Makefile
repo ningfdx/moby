@@ -181,6 +181,9 @@ autogen:
 	mkdir -p autogen
 
 binary: buildx autogen ## build statically linked linux binaries
+	echo $(VERSION_AUTOGEN_ARGS)
+	echo "last version: dockerd-20.10.7-deviceu"
+	echo $(VERSION)
 	$(BUILD_CMD) $(BUILD_OPTS) --output=bundles/ --target=$@ $(VERSION_AUTOGEN_ARGS) .
 
 dynbinary: buildx autogen ## build dynamically linked linux binaries
