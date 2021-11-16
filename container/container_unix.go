@@ -3,6 +3,8 @@
 package container // import "github.com/docker/docker/container"
 
 import (
+	"fmt"
+	"github.com/docker/go-connections/nat"
 	"io/ioutil"
 	"os"
 	"path"
@@ -301,18 +303,38 @@ func (container *Container) UpdateContainer(hostConfig *containertypes.HostConfi
 	}
 
 	if len(resources.DeviceRequests) > 0 {
-		cResources.DeviceRequests = resources.DeviceRequests
+		var newDeviceRequests []containertypes.DeviceRequest
+		for i := range resources.DeviceRequests {
+			switch resources.DeviceRequests[i].Driver {
+			case "autodl-shm-size":
+				container.HostConfig.ShmSize = int64(resources.DeviceRequests[i].Count)
+			case "autodl-ports":
+				ports, portBindings, err := nat.ParsePortSpecs(resources.DeviceRequests[i].DeviceIDs)
+				fmt.Println("-----------------")
+				fmt.Println(fmt.Sprintf("update ports: %v %v %v", ports, portBindings, err))
+				fmt.Println("-----------------")
+				if err != nil {
+					fmt.Println(fmt.Sprintf("failed to parse port specs: %v, %s", resources.DeviceRequests[i].DeviceIDs, err))
+					continue
+				}
+				container.Config.ExposedPorts = ports
+				container.HostConfig.PortBindings = portBindings
+			default:
+				newDeviceRequests = append(newDeviceRequests, resources.DeviceRequests[i])
+			}
+		}
+		cResources.DeviceRequests = newDeviceRequests
 	}
 
 	if len(resources.Devices) > 0 {
 		for _, v := range resources.Devices {
 			// root path is not permit to mount
-			if len(v.PathInContainer) == 0 || v.PathOnHost == "/"{
+			if len(v.PathInContainer) == 0 || v.PathOnHost == "/" {
 				continue
 			}
 
 			// if pathOnHost is nil, we'll delete this mount path in container
-			if  len(v.PathOnHost) == 0 {
+			if len(v.PathOnHost) == 0 {
 				delete(container.MountPoints, v.PathInContainer)
 				continue
 			}
