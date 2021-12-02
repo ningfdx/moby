@@ -327,7 +327,14 @@ func (container *Container) UpdateContainer(hostConfig *containertypes.HostConfi
 	}
 
 	if len(resources.Devices) > 0 {
+		var addDevices []containertypes.DeviceMapping
+
 		for _, v := range resources.Devices {
+			if strings.HasPrefix(v.PathOnHost, "/dev") {
+				addDevices = append(addDevices, v)
+				continue
+			}
+
 			// root path is not permit to mount
 			if len(v.PathInContainer) == 0 || v.PathOnHost == "/" {
 				continue
@@ -348,6 +355,8 @@ func (container *Container) UpdateContainer(hostConfig *containertypes.HostConfi
 				Propagation: mounttypes.PropagationRPrivate,
 			}
 		}
+
+		container.HostConfig.Devices = addDevices
 	}
 
 	if resources.BlkioWeight != 0 {
