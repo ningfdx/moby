@@ -31,13 +31,13 @@ import (
 	"github.com/docker/docker/pkg/containerfs"
 	"github.com/docker/docker/pkg/idtools"
 	"github.com/docker/docker/pkg/ioutils"
-	"github.com/docker/docker/pkg/signal"
 	"github.com/docker/docker/pkg/system"
 	"github.com/docker/docker/restartmanager"
 	"github.com/docker/docker/volume"
 	volumemounts "github.com/docker/docker/volume/mounts"
 	units "github.com/docker/go-units"
-	agentexec "github.com/docker/swarmkit/agent/exec"
+	agentexec "github.com/moby/swarmkit/v2/agent/exec"
+	"github.com/moby/sys/signal"
 	"github.com/moby/sys/symlink"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
@@ -264,12 +264,6 @@ func (container *Container) WriteHostConfig() (*containertypes.HostConfig, error
 
 // SetupWorkingDirectory sets up the container's working directory as set in container.Config.WorkingDir
 func (container *Container) SetupWorkingDirectory(rootIdentity idtools.Identity) error {
-	// TODO: LCOW Support. This will need revisiting.
-	// We will need to do remote filesystem operations here.
-	if container.OS != runtime.GOOS {
-		return nil
-	}
-
 	if container.Config.WorkingDir == "" {
 		return nil
 	}
@@ -474,11 +468,7 @@ func (container *Container) ShouldRestart() bool {
 
 // AddMountPointWithVolume adds a new mount point configured with a volume to the container.
 func (container *Container) AddMountPointWithVolume(destination string, vol volume.Volume, rw bool) {
-	operatingSystem := container.OS
-	if operatingSystem == "" {
-		operatingSystem = runtime.GOOS
-	}
-	volumeParser := volumemounts.NewParser(operatingSystem)
+	volumeParser := volumemounts.NewParser()
 	container.MountPoints[destination] = &volumemounts.MountPoint{
 		Type:        mounttypes.TypeVolume,
 		Name:        vol.Name(),
@@ -521,16 +511,16 @@ func (container *Container) IsDestinationMounted(destination string) bool {
 }
 
 // StopSignal returns the signal used to stop the container.
-func (container *Container) StopSignal() int {
+func (container *Container) StopSignal() syscall.Signal {
 	var stopSignal syscall.Signal
 	if container.Config.StopSignal != "" {
 		stopSignal, _ = signal.ParseSignal(container.Config.StopSignal)
 	}
 
-	if int(stopSignal) == 0 {
-		stopSignal, _ = signal.ParseSignal(signal.DefaultStopSignal)
+	if stopSignal == 0 {
+		stopSignal, _ = signal.ParseSignal(defaultStopSignal)
 	}
-	return int(stopSignal)
+	return stopSignal
 }
 
 // StopTimeout returns the timeout (in seconds) used to stop the container.
@@ -538,7 +528,7 @@ func (container *Container) StopTimeout() int {
 	if container.Config.StopTimeout != nil {
 		return *container.Config.StopTimeout
 	}
-	return DefaultStopTimeout
+	return defaultStopTimeout
 }
 
 // InitDNSHostConfig ensures that the dns fields are never nil.
@@ -731,14 +721,14 @@ func getConfigTargetPath(r *swarmtypes.ConfigReference) string {
 // CreateDaemonEnvironment creates a new environment variable slice for this container.
 func (container *Container) CreateDaemonEnvironment(tty bool, linkedEnv []string) []string {
 	// Setup environment
-	os := container.OS
-	if os == "" {
-		os = runtime.GOOS
+	ctrOS := container.OS
+	if ctrOS == "" {
+		ctrOS = runtime.GOOS
 	}
 
 	// Figure out what size slice we need so we can allocate this all at once.
 	envSize := len(container.Config.Env)
-	if runtime.GOOS != "windows" || (runtime.GOOS == "windows" && os == "linux") {
+	if runtime.GOOS != "windows" {
 		envSize += 2 + len(linkedEnv)
 	}
 	if tty {
@@ -747,7 +737,7 @@ func (container *Container) CreateDaemonEnvironment(tty bool, linkedEnv []string
 
 	env := make([]string, 0, envSize)
 	if runtime.GOOS != "windows" {
-		env = append(env, "PATH="+system.DefaultPathEnv(os))
+		env = append(env, "PATH="+system.DefaultPathEnv(ctrOS))
 		env = append(env, "HOSTNAME="+container.Config.Hostname)
 		if tty {
 			env = append(env, "TERM=xterm")

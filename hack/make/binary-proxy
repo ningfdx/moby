@@ -3,7 +3,9 @@
 set -e
 
 (
-	GO_PACKAGE='github.com/docker/docker/libnetwork/cmd/proxy'
+	export CGO_ENABLED=0
+
+	GO_PACKAGE='github.com/docker/docker/cmd/docker-proxy'
 	BINARY_SHORT_NAME='docker-proxy'
 
 	source "${MAKEDIR}/.binary"

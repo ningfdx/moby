@@ -3,7 +3,6 @@ package chrootarchive // import "github.com/docker/docker/pkg/chrootarchive"
 import (
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net"
 	"os"
 	"os/user"
@@ -21,10 +20,7 @@ func init() {
 }
 
 // NewArchiver returns a new Archiver which uses chrootarchive.Untar
-func NewArchiver(idMapping *idtools.IdentityMapping) *archive.Archiver {
-	if idMapping == nil {
-		idMapping = &idtools.IdentityMapping{}
-	}
+func NewArchiver(idMapping idtools.IdentityMapping) *archive.Archiver {
 	return &archive.Archiver{
 		Untar:     Untar,
 		IDMapping: idMapping,
@@ -74,17 +70,20 @@ func untarHandler(tarArchive io.Reader, dest string, options *archive.TarOptions
 		options.ExcludePatterns = []string{}
 	}
 
-	idMapping := idtools.NewIDMappingsFromMaps(options.UIDMaps, options.GIDMaps)
-	rootIDs := idMapping.RootPair()
+	// If dest is inside a root then directory is created within chroot by extractor.
+	// This case is only currently used by cp.
+	if dest == root {
+		rootIDs := options.IDMap.RootPair()
 
-	dest = filepath.Clean(dest)
-	if _, err := os.Stat(dest); os.IsNotExist(err) {
-		if err := idtools.MkdirAllAndChownNew(dest, 0755, rootIDs); err != nil {
-			return err
+		dest = filepath.Clean(dest)
+		if _, err := os.Stat(dest); os.IsNotExist(err) {
+			if err := idtools.MkdirAllAndChownNew(dest, 0755, rootIDs); err != nil {
+				return err
+			}
 		}
 	}
 
-	r := ioutil.NopCloser(tarArchive)
+	r := io.NopCloser(tarArchive)
 	if decompress {
 		decompressedArchive, err := archive.DecompressStream(tarArchive)
 		if err != nil {

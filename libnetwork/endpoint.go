@@ -54,7 +54,6 @@ type endpoint struct {
 	iface             *endpointInterface
 	joinInfo          *endpointJoinInfo
 	sandboxID         string
-	locator           string
 	exposedPorts      []types.TransportPort
 	anonymous         bool
 	disableResolution bool
@@ -90,7 +89,6 @@ func (ep *endpoint) MarshalJSON() ([]byte, error) {
 		epMap["generic"] = ep.generic
 	}
 	epMap["sandbox"] = ep.sandboxID
-	epMap["locator"] = ep.locator
 	epMap["anonymous"] = ep.anonymous
 	epMap["disableResolution"] = ep.disableResolution
 	epMap["myAliases"] = ep.myAliases
@@ -190,9 +188,6 @@ func (ep *endpoint) UnmarshalJSON(b []byte) (err error) {
 	if v, ok := epMap["disableResolution"]; ok {
 		ep.disableResolution = v.(bool)
 	}
-	if l, ok := epMap["locator"]; ok {
-		ep.locator = l.(string)
-	}
 
 	if sn, ok := epMap["svcName"]; ok {
 		ep.svcName = sn.(string)
@@ -239,7 +234,6 @@ func (ep *endpoint) CopyTo(o datastore.KVObject) error {
 	dstEp.name = ep.name
 	dstEp.id = ep.id
 	dstEp.sandboxID = ep.sandboxID
-	dstEp.locator = ep.locator
 	dstEp.dbIndex = ep.dbIndex
 	dstEp.dbExists = ep.dbExists
 	dstEp.anonymous = ep.anonymous
@@ -494,7 +488,8 @@ func (ep *endpoint) sbJoin(sb *sandbox, options ...EndpointOption) (err error) {
 		n.getController().watchSvcRecord(ep)
 	}
 
-	if doUpdateHostsFile(n, sb) {
+	// Do not update hosts file with internal networks endpoint IP
+	if !n.ingress && n.Name() != libnGWNetwork {
 		var addresses []string
 		if ip := ep.getFirstInterfaceIPv4Address(); ip != nil {
 			addresses = append(addresses, ip.String())
@@ -598,10 +593,6 @@ func (ep *endpoint) sbJoin(sb *sandbox, options ...EndpointOption) (err error) {
 	return nil
 }
 
-func doUpdateHostsFile(n *network, sb *sandbox) bool {
-	return !n.ingress && n.Name() != libnGWNetwork
-}
-
 func (ep *endpoint) rename(name string) error {
 	var (
 		err      error
@@ -680,7 +671,7 @@ func (ep *endpoint) rename(name string) error {
 	// benign error. Besides there is no meaningful recovery that
 	// we can do. When the cluster recovers subsequent EpCnt update
 	// will force the peers to get the correct EP name.
-	n.getEpCnt().updateStore() // nolint:errcheck
+	_ = n.getEpCnt().updateStore()
 
 	return err
 }

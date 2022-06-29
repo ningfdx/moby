@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"runtime"
 	"sync/atomic"
 	"testing"
@@ -16,7 +15,7 @@ import (
 	"github.com/docker/docker/image"
 	"github.com/docker/docker/layer"
 	"github.com/docker/docker/pkg/progress"
-	digest "github.com/opencontainers/go-digest"
+	"github.com/opencontainers/go-digest"
 	"gotest.tools/v3/assert"
 )
 
@@ -30,7 +29,7 @@ type mockLayer struct {
 }
 
 func (ml *mockLayer) TarStream() (io.ReadCloser, error) {
-	return ioutil.NopCloser(bytes.NewBuffer(ml.layerData.Bytes())), nil
+	return io.NopCloser(bytes.NewBuffer(ml.layerData.Bytes())), nil
 }
 
 func (ml *mockLayer) TarStreamFrom(layer.ChainID) (io.ReadCloser, error) {
@@ -49,12 +48,12 @@ func (ml *mockLayer) Parent() layer.Layer {
 	return ml.parent
 }
 
-func (ml *mockLayer) Size() (size int64, err error) {
-	return 0, nil
+func (ml *mockLayer) Size() int64 {
+	return 0
 }
 
-func (ml *mockLayer) DiffSize() (size int64, err error) {
-	return 0, nil
+func (ml *mockLayer) DiffSize() int64 {
+	return 0
 }
 
 func (ml *mockLayer) Metadata() (map[string]string, error) {
@@ -192,7 +191,7 @@ func (d *mockDownloadDescriptor) mockTarStream() io.ReadCloser {
 	// The mock implementation returns the ID repeated 5 times as a tar
 	// stream instead of actual tar data. The data is ignored except for
 	// computing IDs.
-	return ioutil.NopCloser(bytes.NewBuffer([]byte(d.id + d.id + d.id + d.id + d.id)))
+	return io.NopCloser(bytes.NewBuffer([]byte(d.id + d.id + d.id + d.id + d.id)))
 }
 
 // Download is called to perform the download.
@@ -269,9 +268,7 @@ func TestSuccessfulDownload(t *testing.T) {
 	}
 
 	layerStore := &mockLayerStore{make(map[layer.ChainID]*mockLayer)}
-	lsMap := make(map[string]layer.Store)
-	lsMap[runtime.GOOS] = layerStore
-	ldm := NewLayerDownloadManager(lsMap, maxDownloadConcurrency, func(m *LayerDownloadManager) { m.waitDuration = time.Millisecond })
+	ldm := NewLayerDownloadManager(layerStore, maxDownloadConcurrency, func(m *LayerDownloadManager) { m.waitDuration = time.Millisecond })
 
 	progressChan := make(chan progress.Progress)
 	progressDone := make(chan struct{})
@@ -296,7 +293,7 @@ func TestSuccessfulDownload(t *testing.T) {
 	}
 	firstDescriptor.diffID = l.DiffID()
 
-	rootFS, releaseFunc, err := ldm.Download(context.Background(), *image.NewRootFS(), runtime.GOOS, descriptors, progress.ChanOutput(progressChan))
+	rootFS, releaseFunc, err := ldm.Download(context.Background(), *image.NewRootFS(), descriptors, progress.ChanOutput(progressChan))
 	if err != nil {
 		t.Fatalf("download error: %v", err)
 	}
@@ -333,9 +330,7 @@ func TestSuccessfulDownload(t *testing.T) {
 
 func TestCancelledDownload(t *testing.T) {
 	layerStore := &mockLayerStore{make(map[layer.ChainID]*mockLayer)}
-	lsMap := make(map[string]layer.Store)
-	lsMap[runtime.GOOS] = layerStore
-	ldm := NewLayerDownloadManager(lsMap, maxDownloadConcurrency, func(m *LayerDownloadManager) { m.waitDuration = time.Millisecond })
+	ldm := NewLayerDownloadManager(layerStore, maxDownloadConcurrency, func(m *LayerDownloadManager) { m.waitDuration = time.Millisecond })
 	progressChan := make(chan progress.Progress)
 	progressDone := make(chan struct{})
 
@@ -353,8 +348,9 @@ func TestCancelledDownload(t *testing.T) {
 	}()
 
 	descriptors := downloadDescriptors(nil)
-	_, _, err := ldm.Download(ctx, *image.NewRootFS(), runtime.GOOS, descriptors, progress.ChanOutput(progressChan))
+	_, _, err := ldm.Download(ctx, *image.NewRootFS(), descriptors, progress.ChanOutput(progressChan))
 	if err != context.Canceled {
+		close(progressChan)
 		t.Fatal("expected download to be cancelled")
 	}
 
@@ -396,10 +392,8 @@ func TestMaxDownloadAttempts(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			layerStore := &mockLayerStore{make(map[layer.ChainID]*mockLayer)}
-			lsMap := make(map[string]layer.Store)
-			lsMap[runtime.GOOS] = layerStore
 			ldm := NewLayerDownloadManager(
-				lsMap,
+				layerStore,
 				maxDownloadConcurrency,
 				func(m *LayerDownloadManager) {
 					m.waitDuration = time.Millisecond
@@ -419,7 +413,7 @@ func TestMaxDownloadAttempts(t *testing.T) {
 			descriptors := downloadDescriptors(&currentDownloads)
 			descriptors[4].(*mockDownloadDescriptor).simulateRetries = tc.simulateRetries
 
-			_, _, err := ldm.Download(context.Background(), *image.NewRootFS(), runtime.GOOS, descriptors, progress.ChanOutput(progressChan))
+			_, _, err := ldm.Download(context.Background(), *image.NewRootFS(), descriptors, progress.ChanOutput(progressChan))
 			if tc.expectedErr == "" {
 				assert.NilError(t, err)
 			} else {

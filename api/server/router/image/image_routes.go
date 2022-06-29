@@ -7,16 +7,19 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/containerd/containerd/platforms"
+	"github.com/docker/distribution/reference"
 	"github.com/docker/docker/api/server/httputils"
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/versions"
 	"github.com/docker/docker/errdefs"
+	"github.com/docker/docker/image"
+	"github.com/docker/docker/layer"
 	"github.com/docker/docker/pkg/ioutils"
 	"github.com/docker/docker/pkg/streamformatter"
-	"github.com/docker/docker/registry"
 	specs "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
 )
@@ -29,13 +32,13 @@ func (s *imageRouter) postImagesCreate(ctx context.Context, w http.ResponseWrite
 	}
 
 	var (
-		image    = r.Form.Get("fromImage")
-		repo     = r.Form.Get("repo")
-		tag      = r.Form.Get("tag")
-		message  = r.Form.Get("message")
-		err      error
-		output   = ioutils.NewWriteFlusher(w)
-		platform *specs.Platform
+		image       = r.Form.Get("fromImage")
+		repo        = r.Form.Get("repo")
+		tag         = r.Form.Get("tag")
+		message     = r.Form.Get("message")
+		progressErr error
+		output      = ioutils.NewWriteFlusher(w)
+		platform    *specs.Platform
 	)
 	defer output.Close()
 
@@ -43,9 +46,8 @@ func (s *imageRouter) postImagesCreate(ctx context.Context, w http.ResponseWrite
 
 	version := httputils.VersionFromContext(ctx)
 	if versions.GreaterThanOrEqualTo(version, "1.32") {
-		apiPlatform := r.FormValue("platform")
-		if apiPlatform != "" {
-			sp, err := platforms.Parse(apiPlatform)
+		if p := r.FormValue("platform"); p != "" {
+			sp, err := platforms.Parse(p)
 			if err != nil {
 				return err
 			}
@@ -71,23 +73,16 @@ func (s *imageRouter) postImagesCreate(ctx context.Context, w http.ResponseWrite
 				authConfig = &types.AuthConfig{}
 			}
 		}
-		err = s.backend.PullImage(ctx, image, tag, platform, metaHeaders, authConfig, output)
+		progressErr = s.backend.PullImage(ctx, image, tag, platform, metaHeaders, authConfig, output)
 	} else { // import
 		src := r.Form.Get("fromSrc")
-		// 'err' MUST NOT be defined within this block, we need any error
-		// generated from the download to be available to the output
-		// stream processing below
-		os := ""
-		if platform != nil {
-			os = platform.OS
-		}
-		err = s.backend.ImportImage(src, repo, os, tag, message, r.Body, output, r.Form["changes"])
+		progressErr = s.backend.ImportImage(src, repo, platform, tag, message, r.Body, output, r.Form["changes"])
 	}
-	if err != nil {
+	if progressErr != nil {
 		if !output.Flushed() {
-			return err
+			return progressErr
 		}
-		_, _ = output.Write(streamformatter.FormatError(err))
+		_, _ = output.Write(streamformatter.FormatError(progressErr))
 	}
 
 	return nil
@@ -209,12 +204,96 @@ func (s *imageRouter) deleteImages(ctx context.Context, w http.ResponseWriter, r
 }
 
 func (s *imageRouter) getImagesByName(ctx context.Context, w http.ResponseWriter, r *http.Request, vars map[string]string) error {
-	imageInspect, err := s.backend.LookupImage(vars["name"])
+	image, err := s.backend.GetImage(vars["name"], nil)
+	if err != nil {
+		return err
+	}
+
+	imageInspect, err := s.toImageInspect(image)
 	if err != nil {
 		return err
 	}
 
 	return httputils.WriteJSON(w, http.StatusOK, imageInspect)
+}
+
+func (s *imageRouter) toImageInspect(img *image.Image) (*types.ImageInspect, error) {
+	refs := s.referenceBackend.References(img.ID().Digest())
+	repoTags := []string{}
+	repoDigests := []string{}
+	for _, ref := range refs {
+		switch ref.(type) {
+		case reference.NamedTagged:
+			repoTags = append(repoTags, reference.FamiliarString(ref))
+		case reference.Canonical:
+			repoDigests = append(repoDigests, reference.FamiliarString(ref))
+		}
+	}
+
+	var size int64
+	var layerMetadata map[string]string
+	layerID := img.RootFS.ChainID()
+	if layerID != "" {
+		l, err := s.layerStore.Get(layerID)
+		if err != nil {
+			return nil, err
+		}
+		defer layer.ReleaseAndLog(s.layerStore, l)
+		size = l.Size()
+		layerMetadata, err = l.Metadata()
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	comment := img.Comment
+	if len(comment) == 0 && len(img.History) > 0 {
+		comment = img.History[len(img.History)-1].Comment
+	}
+
+	lastUpdated, err := s.imageStore.GetLastUpdated(img.ID())
+	if err != nil {
+		return nil, err
+	}
+
+	return &types.ImageInspect{
+		ID:              img.ID().String(),
+		RepoTags:        repoTags,
+		RepoDigests:     repoDigests,
+		Parent:          img.Parent.String(),
+		Comment:         comment,
+		Created:         img.Created.Format(time.RFC3339Nano),
+		Container:       img.Container,
+		ContainerConfig: &img.ContainerConfig,
+		DockerVersion:   img.DockerVersion,
+		Author:          img.Author,
+		Config:          img.Config,
+		Architecture:    img.Architecture,
+		Variant:         img.Variant,
+		Os:              img.OperatingSystem(),
+		OsVersion:       img.OSVersion,
+		Size:            size,
+		VirtualSize:     size, // TODO: field unused, deprecate
+		GraphDriver: types.GraphDriverData{
+			Name: s.layerStore.DriverName(),
+			Data: layerMetadata,
+		},
+		RootFS: rootFSToAPIType(img.RootFS),
+		Metadata: types.ImageMetadata{
+			LastTagTime: lastUpdated,
+		},
+	}, nil
+}
+
+func rootFSToAPIType(rootfs *image.RootFS) types.RootFS {
+	var layers []string
+	for _, l := range rootfs.DiffIDs {
+		layers = append(layers, l.String())
+	}
+	return types.RootFS{
+		Type:   rootfs.Type,
+		Layers: layers,
+	}
 }
 
 func (s *imageRouter) getImagesJSON(ctx context.Context, w http.ResponseWriter, r *http.Request, vars map[string]string) error {
@@ -229,13 +308,24 @@ func (s *imageRouter) getImagesJSON(ctx context.Context, w http.ResponseWriter, 
 
 	version := httputils.VersionFromContext(ctx)
 	if versions.LessThan(version, "1.41") {
+		// NOTE: filter is a shell glob string applied to repository names.
 		filterParam := r.Form.Get("filter")
 		if filterParam != "" {
 			imageFilters.Add("reference", filterParam)
 		}
 	}
 
-	images, err := s.backend.Images(imageFilters, httputils.BoolValue(r, "all"), false)
+	var sharedSize bool
+	if versions.GreaterThanOrEqualTo(version, "1.42") {
+		// NOTE: Support for the "shared-size" parameter was added in API 1.42.
+		sharedSize = httputils.BoolValue(r, "shared-size")
+	}
+
+	images, err := s.backend.Images(ctx, types.ImageListOptions{
+		All:        httputils.BoolValue(r, "all"),
+		Filters:    imageFilters,
+		SharedSize: sharedSize,
+	})
 	if err != nil {
 		return err
 	}
@@ -287,15 +377,21 @@ func (s *imageRouter) getImagesSearch(ctx context.Context, w http.ResponseWriter
 			headers[k] = v
 		}
 	}
-	limit := registry.DefaultSearchLimit
+
+	var limit int
 	if r.Form.Get("limit") != "" {
-		limitValue, err := strconv.Atoi(r.Form.Get("limit"))
-		if err != nil {
-			return err
+		var err error
+		limit, err = strconv.Atoi(r.Form.Get("limit"))
+		if err != nil || limit < 0 {
+			return errdefs.InvalidParameter(errors.Wrap(err, "invalid limit specified"))
 		}
-		limit = limitValue
 	}
-	query, err := s.backend.SearchRegistryForImages(ctx, r.Form.Get("filters"), r.Form.Get("term"), limit, config, headers)
+	searchFilters, err := filters.FromJSON(r.Form.Get("filters"))
+	if err != nil {
+		return err
+	}
+
+	query, err := s.backend.SearchRegistryForImages(ctx, searchFilters, r.Form.Get("term"), limit, config, headers)
 	if err != nil {
 		return err
 	}

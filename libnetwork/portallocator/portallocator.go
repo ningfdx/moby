@@ -9,31 +9,6 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-var (
-	// defaultPortRangeStart indicates the first port in port range
-	defaultPortRangeStart = 49153
-	// defaultPortRangeEnd indicates the last port in port range
-	// consistent with default /proc/sys/net/ipv4/ip_local_port_range
-	// upper bound on linux
-	defaultPortRangeEnd = 60999
-)
-
-func sanitizePortRange(start int, end int) (newStart, newEnd int, err error) {
-	if start > defaultPortRangeEnd || end < defaultPortRangeStart || start > end {
-		return 0, 0, fmt.Errorf("Request out allowed range [%v, %v]",
-			defaultPortRangeStart, defaultPortRangeEnd)
-	}
-	err = nil
-	newStart, newEnd = start, end
-	if start < defaultPortRangeStart {
-		newStart = defaultPortRangeStart
-	}
-	if end > defaultPortRangeEnd {
-		newEnd = defaultPortRangeEnd
-	}
-	return
-}
-
 type ipMapping map[string]protoMap
 
 var (
@@ -44,7 +19,6 @@ var (
 	defaultIP          = net.ParseIP("0.0.0.0")
 	once               sync.Once
 	instance           *PortAllocator
-	createInstance     = func() { instance = newInstance() }
 )
 
 // ErrPortAlreadyAllocated is the returned error information when a requested port is already being used
@@ -108,23 +82,18 @@ func Get() *PortAllocator {
 	// the OS so that it can have up to date view of the OS port allocation.
 	// When this happens singleton behavior will be removed. Clients do not
 	// need to worry about this, they will not see a change in behavior.
-	once.Do(createInstance)
+	once.Do(func() {
+		instance = newInstance()
+	})
 	return instance
 }
 
-func getDefaultPortRange() (int, int) {
+func newInstance() *PortAllocator {
 	start, end, err := getDynamicPortRange()
-	if err == nil {
-		start, end, err = sanitizePortRange(start, end)
-	}
 	if err != nil {
+		logrus.WithError(err).Infof("falling back to default port range %d-%d", defaultPortRangeStart, defaultPortRangeEnd)
 		start, end = defaultPortRangeStart, defaultPortRangeEnd
 	}
-	return start, end
-}
-
-func newInstance() *PortAllocator {
-	start, end := getDefaultPortRange()
 	return &PortAllocator{
 		ipMap: ipMapping{},
 		Begin: start,
@@ -195,35 +164,6 @@ func (p *PortAllocator) ReleasePort(ip net.IP, proto string, port int) error {
 		return nil
 	}
 	delete(protomap[proto].p, port)
-	return nil
-}
-
-// SetPortRange sets dynamic port allocation range.
-// if both portBegin and portEnd are 0, the port range reverts to default
-// value. Otherwise they are sanitized against the default values to
-// ensure their validity.
-func (p *PortAllocator) SetPortRange(portBegin, portEnd int) error {
-	// if begin and end is zero, revert to default values
-	var begin, end int
-	var err error
-	if portBegin == 0 && portEnd == 0 {
-		begin, end = getDefaultPortRange()
-
-	} else {
-		begin, end, err = sanitizePortRange(portBegin, portEnd)
-		if err != nil {
-			return err
-		}
-	}
-	logrus.Debugf("Setting up port allocator to range %v-%v, current %v-%v",
-		begin, end, p.Begin, p.End)
-	p.mutex.Lock()
-	defer p.mutex.Unlock()
-	if p.Begin == begin && p.End == end {
-		return nil
-	}
-	p.ipMap = ipMapping{}
-	p.Begin, p.End = begin, end
 	return nil
 }
 

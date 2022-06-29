@@ -1,45 +1,35 @@
+//go:build linux
 // +build linux
 
 package bridge
 
 import (
 	"fmt"
-	"io/ioutil"
 	"net"
 	"os"
 
-	"github.com/docker/docker/libnetwork/types"
 	"github.com/sirupsen/logrus"
 	"github.com/vishvananda/netlink"
 )
 
-var bridgeIPv6 *net.IPNet
+// bridgeIPv6 is the default, link-local IPv6 address for the bridge (fe80::1/64)
+var bridgeIPv6 = &net.IPNet{IP: net.ParseIP("fe80::1"), Mask: net.CIDRMask(64, 128)}
 
 const (
-	bridgeIPv6Str          = "fe80::1/64"
 	ipv6ForwardConfPerm    = 0644
 	ipv6ForwardConfDefault = "/proc/sys/net/ipv6/conf/default/forwarding"
 	ipv6ForwardConfAll     = "/proc/sys/net/ipv6/conf/all/forwarding"
 )
 
-func init() {
-	// We allow ourselves to panic in this special case because we indicate a
-	// failure to parse a compile-time define constant.
-	var err error
-	if bridgeIPv6, err = types.ParseCIDR(bridgeIPv6Str); err != nil {
-		panic(fmt.Sprintf("Cannot parse default bridge IPv6 address %q: %v", bridgeIPv6Str, err))
-	}
-}
-
 func setupBridgeIPv6(config *networkConfiguration, i *bridgeInterface) error {
 	procFile := "/proc/sys/net/ipv6/conf/" + config.BridgeName + "/disable_ipv6"
-	ipv6BridgeData, err := ioutil.ReadFile(procFile)
+	ipv6BridgeData, err := os.ReadFile(procFile)
 	if err != nil {
 		return fmt.Errorf("Cannot read IPv6 setup for bridge %v: %v", config.BridgeName, err)
 	}
 	// Enable IPv6 on the bridge only if it isn't already enabled
 	if ipv6BridgeData[0] != '0' {
-		if err := ioutil.WriteFile(procFile, []byte{'0', '\n'}, ipv6ForwardConfPerm); err != nil {
+		if err := os.WriteFile(procFile, []byte{'0', '\n'}, ipv6ForwardConfPerm); err != nil {
 			return fmt.Errorf("Unable to enable IPv6 addresses on bridge: %v", err)
 		}
 	}
@@ -94,25 +84,25 @@ func setupGatewayIPv6(config *networkConfiguration, i *bridgeInterface) error {
 
 func setupIPv6Forwarding(config *networkConfiguration, i *bridgeInterface) error {
 	// Get current IPv6 default forwarding setup
-	ipv6ForwardDataDefault, err := ioutil.ReadFile(ipv6ForwardConfDefault)
+	ipv6ForwardDataDefault, err := os.ReadFile(ipv6ForwardConfDefault)
 	if err != nil {
 		return fmt.Errorf("Cannot read IPv6 default forwarding setup: %v", err)
 	}
 	// Enable IPv6 default forwarding only if it is not already enabled
 	if ipv6ForwardDataDefault[0] != '1' {
-		if err := ioutil.WriteFile(ipv6ForwardConfDefault, []byte{'1', '\n'}, ipv6ForwardConfPerm); err != nil {
+		if err := os.WriteFile(ipv6ForwardConfDefault, []byte{'1', '\n'}, ipv6ForwardConfPerm); err != nil {
 			logrus.Warnf("Unable to enable IPv6 default forwarding: %v", err)
 		}
 	}
 
 	// Get current IPv6 all forwarding setup
-	ipv6ForwardDataAll, err := ioutil.ReadFile(ipv6ForwardConfAll)
+	ipv6ForwardDataAll, err := os.ReadFile(ipv6ForwardConfAll)
 	if err != nil {
 		return fmt.Errorf("Cannot read IPv6 all forwarding setup: %v", err)
 	}
 	// Enable IPv6 all forwarding only if it is not already enabled
 	if ipv6ForwardDataAll[0] != '1' {
-		if err := ioutil.WriteFile(ipv6ForwardConfAll, []byte{'1', '\n'}, ipv6ForwardConfPerm); err != nil {
+		if err := os.WriteFile(ipv6ForwardConfAll, []byte{'1', '\n'}, ipv6ForwardConfPerm); err != nil {
 			logrus.Warnf("Unable to enable IPv6 all forwarding: %v", err)
 		}
 	}

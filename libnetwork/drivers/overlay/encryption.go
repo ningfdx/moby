@@ -1,3 +1,4 @@
+//go:build linux
 // +build linux
 
 package overlay
@@ -628,8 +629,9 @@ func clearEncryptionStates() {
 		logrus.Warnf("Failed to retrieve SA list for cleanup: %v", err)
 	}
 	for _, sp := range spList {
+		sp := sp
 		if sp.Mark != nil && sp.Mark.Value == spMark.Value {
-			if err := nlh.XfrmPolicyDel(&sp); err != nil { // nolint:gosec
+			if err := nlh.XfrmPolicyDel(&sp); err != nil {
 				logrus.Warnf("Failed to delete stale SP %s: %v", sp, err)
 				continue
 			}
@@ -637,8 +639,9 @@ func clearEncryptionStates() {
 		}
 	}
 	for _, sa := range saList {
+		sa := sa
 		if sa.Reqid == r {
-			if err := nlh.XfrmStateDel(&sa); err != nil { // nolint:gosec
+			if err := nlh.XfrmStateDel(&sa); err != nil {
 				logrus.Warnf("Failed to delete stale SA %s: %v", sa, err)
 				continue
 			}

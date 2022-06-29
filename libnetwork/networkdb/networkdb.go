@@ -192,6 +192,14 @@ type Config struct {
 	// NOTE this MUST always be higher than reapEntryInterval
 	reapNetworkInterval time.Duration
 
+	// rejoinClusterDuration represents retryJoin timeout used by rejoinClusterBootStrap.
+	// Default is 10sec.
+	rejoinClusterDuration time.Duration
+
+	// rejoinClusterInterval represents interval on which rejoinClusterBootStrap runs.
+	// Default is 60sec.
+	rejoinClusterInterval time.Duration
+
 	// StatsPrintPeriod the period to use to print queue stats
 	// Default is 5min
 	StatsPrintPeriod time.Duration
@@ -225,13 +233,15 @@ type entry struct {
 func DefaultConfig() *Config {
 	hostname, _ := os.Hostname()
 	return &Config{
-		NodeID:            stringid.TruncateID(stringid.GenerateRandomID()),
-		Hostname:          hostname,
-		BindAddr:          "0.0.0.0",
-		PacketBufferSize:  1400,
-		StatsPrintPeriod:  5 * time.Minute,
-		HealthPrintPeriod: 1 * time.Minute,
-		reapEntryInterval: 30 * time.Minute,
+		NodeID:                stringid.TruncateID(stringid.GenerateRandomID()),
+		Hostname:              hostname,
+		BindAddr:              "0.0.0.0",
+		PacketBufferSize:      1400,
+		StatsPrintPeriod:      5 * time.Minute,
+		HealthPrintPeriod:     1 * time.Minute,
+		reapEntryInterval:     30 * time.Minute,
+		rejoinClusterDuration: 10 * time.Second,
+		rejoinClusterInterval: 60 * time.Second,
 	}
 }
 
@@ -488,7 +498,7 @@ func (nDB *NetworkDB) deleteNodeNetworkEntries(nid, node string) {
 	// Indicates if the delete is triggered for the local node
 	isNodeLocal := node == nDB.config.NodeID
 
-	nDB.indexes[byNetwork].WalkPrefix(fmt.Sprintf("/%s", nid),
+	nDB.indexes[byNetwork].WalkPrefix("/"+nid,
 		func(path string, v interface{}) bool {
 			oldEntry := v.(*entry)
 			params := strings.Split(path[1:], "/")
@@ -569,7 +579,7 @@ func (nDB *NetworkDB) deleteNodeTableEntries(node string) {
 func (nDB *NetworkDB) WalkTable(tname string, fn func(string, string, []byte, bool) bool) error {
 	nDB.RLock()
 	values := make(map[string]interface{})
-	nDB.indexes[byTable].WalkPrefix(fmt.Sprintf("/%s", tname), func(path string, v interface{}) bool {
+	nDB.indexes[byTable].WalkPrefix("/"+tname, func(path string, v interface{}) bool {
 		values[path] = v
 		return false
 	})

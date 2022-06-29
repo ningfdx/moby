@@ -8,7 +8,7 @@ import (
 	"github.com/docker/distribution/digestset"
 	"github.com/docker/docker/layer"
 	"github.com/docker/docker/pkg/system"
-	digest "github.com/opencontainers/go-digest"
+	"github.com/opencontainers/go-digest"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 )
@@ -42,14 +42,14 @@ type imageMeta struct {
 
 type store struct {
 	sync.RWMutex
-	lss       map[string]LayerGetReleaser
+	lss       LayerGetReleaser
 	images    map[ID]*imageMeta
 	fs        StoreBackend
 	digestSet *digestset.Set
 }
 
 // NewImageStore returns new store object for given set of layer stores
-func NewImageStore(fs StoreBackend, lss map[string]LayerGetReleaser) (Store, error) {
+func NewImageStore(fs StoreBackend, lss LayerGetReleaser) (Store, error) {
 	is := &store{
 		lss:       lss,
 		images:    make(map[ID]*imageMeta),
@@ -78,7 +78,7 @@ func (is *store) restore() error {
 				logrus.Errorf("not restoring image with unsupported operating system %v, %v, %s", dgst, chainID, img.OperatingSystem())
 				return nil
 			}
-			l, err = is.lss[img.OperatingSystem()].Get(chainID)
+			l, err = is.lss.Get(chainID)
 			if err != nil {
 				if err == layer.ErrLayerDoesNotExist {
 					logrus.Errorf("layer does not exist, not restoring image %v, %v, %s", dgst, chainID, img.OperatingSystem())
@@ -160,7 +160,7 @@ func (is *store) Create(config []byte) (ID, error) {
 		if !system.IsOSSupported(img.OperatingSystem()) {
 			return "", system.ErrNotSupportedOperatingSystem
 		}
-		l, err = is.lss[img.OperatingSystem()].Get(layerID)
+		l, err = is.lss.Get(layerID)
 		if err != nil {
 			return "", errors.Wrapf(err, "failed to get layer %s", layerID)
 		}
@@ -229,12 +229,9 @@ func (is *store) Delete(id ID) ([]layer.Metadata, error) {
 	if imageMeta == nil {
 		return nil, fmt.Errorf("unrecognized image ID %s", id.String())
 	}
-	img, err := is.Get(id)
+	_, err := is.Get(id)
 	if err != nil {
 		return nil, fmt.Errorf("unrecognized image %s, %v", id.String(), err)
-	}
-	if !system.IsOSSupported(img.OperatingSystem()) {
-		return nil, fmt.Errorf("unsupported image operating system %q", img.OperatingSystem())
 	}
 	for id := range imageMeta.children {
 		is.fs.DeleteMetadata(id.Digest(), "parent")
@@ -250,7 +247,7 @@ func (is *store) Delete(id ID) ([]layer.Metadata, error) {
 	is.fs.Delete(id.Digest())
 
 	if imageMeta.layer != nil {
-		return is.lss[img.OperatingSystem()].Release(imageMeta.layer)
+		return is.lss.Release(imageMeta.layer)
 	}
 	return nil, nil
 }

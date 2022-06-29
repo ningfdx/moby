@@ -1,4 +1,6 @@
+//go:build linux
 // +build linux
+
 // Network utility functions.
 
 package netutils
@@ -31,7 +33,7 @@ func CheckRouteOverlaps(toCheck *net.IPNet) error {
 		return err
 	}
 	for _, network := range networks {
-		if network.Dst != nil && NetworkOverlaps(toCheck, network.Dst) {
+		if network.Dst != nil && network.Scope == netlink.SCOPE_LINK && NetworkOverlaps(toCheck, network.Dst) {
 			return ErrNetworkOverlaps
 		}
 	}
@@ -69,10 +71,7 @@ func GenerateIfaceName(nlh *netlink.Handle, prefix string, len int) (string, err
 // list the first IPv4 address which does not conflict with other
 // interfaces on the system.
 func ElectInterfaceAddresses(name string) ([]*net.IPNet, []*net.IPNet, error) {
-	var (
-		v4Nets []*net.IPNet
-		v6Nets []*net.IPNet
-	)
+	var v4Nets, v6Nets []*net.IPNet
 
 	defer osl.InitOSContext()()
 

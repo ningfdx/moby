@@ -3,7 +3,6 @@ package plugin // import "github.com/docker/docker/daemon/cluster/controllers/pl
 import (
 	"context"
 	"io"
-	"io/ioutil"
 	"net/http"
 
 	"github.com/docker/distribution/reference"
@@ -12,8 +11,8 @@ import (
 	"github.com/docker/docker/errdefs"
 	"github.com/docker/docker/plugin"
 	v2 "github.com/docker/docker/plugin/v2"
-	"github.com/docker/swarmkit/api"
 	"github.com/gogo/protobuf/proto"
+	"github.com/moby/swarmkit/v2/api"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 )
@@ -118,10 +117,10 @@ func (p *Controller) Prepare(ctx context.Context) (err error) {
 			}
 		}
 		p.pluginID = pl.GetID()
-		return p.backend.Upgrade(ctx, remote, p.spec.Name, nil, &authConfig, privs, ioutil.Discard)
+		return p.backend.Upgrade(ctx, remote, p.spec.Name, nil, &authConfig, privs, io.Discard)
 	}
 
-	if err := p.backend.Pull(ctx, remote, p.spec.Name, nil, &authConfig, privs, ioutil.Discard, plugin.WithSwarmService(p.serviceID), plugin.WithEnv(p.spec.Env)); err != nil {
+	if err := p.backend.Pull(ctx, remote, p.spec.Name, nil, &authConfig, privs, io.Discard, plugin.WithSwarmService(p.serviceID), plugin.WithEnv(p.spec.Env)); err != nil {
 		return err
 	}
 	pl, err = p.backend.Get(p.spec.Name)

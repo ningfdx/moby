@@ -1,3 +1,4 @@
+//go:build !windows
 // +build !windows
 
 package container // import "github.com/docker/docker/container"
@@ -5,7 +6,6 @@ package container // import "github.com/docker/docker/container"
 import (
 	"fmt"
 	"github.com/docker/go-connections/nat"
-	"io/ioutil"
 	"os"
 	"path"
 	"path/filepath"
@@ -27,9 +27,12 @@ import (
 )
 
 const (
-	// DefaultStopTimeout sets the default time, in seconds, to wait
+	// defaultStopSignal is the default syscall signal used to stop a container.
+	defaultStopSignal = "SIGTERM"
+
+	// defaultStopTimeout sets the default time, in seconds, to wait
 	// for the graceful container stop before forcefully terminating it.
-	DefaultStopTimeout = 10
+	defaultStopTimeout = 10
 
 	containerConfigMountPath = "/"
 	containerSecretMountPath = "/run/secrets"
@@ -61,14 +64,14 @@ func (container *Container) BuildHostnameFile() error {
 		return err
 	}
 	container.HostnamePath = hostnamePath
-	return ioutil.WriteFile(container.HostnamePath, []byte(container.Config.Hostname+"\n"), 0644)
+	return os.WriteFile(container.HostnamePath, []byte(container.Config.Hostname+"\n"), 0644)
 }
 
 // NetworkMounts returns the list of network mounts.
 func (container *Container) NetworkMounts() []Mount {
 	var mounts []Mount
 	shared := container.HostConfig.NetworkMode.IsContainer()
-	parser := volumemounts.NewParser(container.OS)
+	parser := volumemounts.NewParser()
 	if container.ResolvConfPath != "" {
 		if _, err := os.Stat(container.ResolvConfPath); err != nil {
 			logrus.Warnf("ResolvConfPath set to %q, but can't stat this filename (err = %v); skipping", container.ResolvConfPath, err)
@@ -203,7 +206,7 @@ func (container *Container) UnmountIpcMount() error {
 // IpcMounts returns the list of IPC mounts
 func (container *Container) IpcMounts() []Mount {
 	var mounts []Mount
-	parser := volumemounts.NewParser(container.OS)
+	parser := volumemounts.NewParser()
 
 	if container.HasMountFor("/dev/shm") {
 		return mounts
@@ -467,7 +470,7 @@ func ignoreUnsupportedXAttrs() fs.CopyDirOpt {
 // copyExistingContents copies from the source to the destination and
 // ensures the ownership is appropriately set.
 func copyExistingContents(source, destination string) error {
-	dstList, err := ioutil.ReadDir(destination)
+	dstList, err := os.ReadDir(destination)
 	if err != nil {
 		return err
 	}
@@ -480,7 +483,6 @@ func copyExistingContents(source, destination string) error {
 
 // TmpfsMounts returns the list of tmpfs mounts
 func (container *Container) TmpfsMounts() ([]Mount, error) {
-	parser := volumemounts.NewParser(container.OS)
 	var mounts []Mount
 	for dest, data := range container.HostConfig.Tmpfs {
 		mounts = append(mounts, Mount{
@@ -489,6 +491,7 @@ func (container *Container) TmpfsMounts() ([]Mount, error) {
 			Data:        data,
 		})
 	}
+	parser := volumemounts.NewParser()
 	for dest, mnt := range container.MountPoints {
 		if mnt.Type == mounttypes.TypeTmpfs {
 			data, err := parser.ConvertTmpfsOptions(mnt.Spec.TmpfsOptions, mnt.Spec.ReadOnly)

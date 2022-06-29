@@ -15,12 +15,15 @@ import (
 	"github.com/docker/docker/daemon/cluster/convert"
 	executorpkg "github.com/docker/docker/daemon/cluster/executor"
 	clustertypes "github.com/docker/docker/daemon/cluster/provider"
+	"github.com/docker/docker/libnetwork"
 	networktypes "github.com/docker/docker/libnetwork/types"
-	"github.com/docker/swarmkit/agent"
-	"github.com/docker/swarmkit/agent/exec"
-	"github.com/docker/swarmkit/api"
-	"github.com/docker/swarmkit/api/naming"
-	"github.com/docker/swarmkit/template"
+	"github.com/moby/swarmkit/v2/agent"
+	"github.com/moby/swarmkit/v2/agent/exec"
+	"github.com/moby/swarmkit/v2/api"
+	"github.com/moby/swarmkit/v2/api/naming"
+	"github.com/moby/swarmkit/v2/log"
+	"github.com/moby/swarmkit/v2/template"
+	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 )
 
@@ -32,6 +35,14 @@ type executor struct {
 	dependencies  exec.DependencyManager
 	mutex         sync.Mutex // This mutex protects the following node field
 	node          *api.NodeDescription
+
+	// nodeObj holds a copy of the swarmkit Node object from the time of the
+	// last call to executor.Configure. This allows us to discover which
+	// network attachments the node previously had, which further allows us to
+	// determine which, if any, need to be removed. nodeObj is not protected by
+	// a mutex, because it is only written to in the method (Configure) that it
+	// is read from. If that changes, it may need to be guarded.
+	nodeObj *api.Node
 }
 
 // NewExecutor returns an executor from the docker client.
@@ -41,7 +52,7 @@ func NewExecutor(b executorpkg.Backend, p plugin.Backend, i executorpkg.ImageBac
 		pluginBackend: p,
 		imageBackend:  i,
 		volumeBackend: v,
-		dependencies:  agent.NewDependencyManager(),
+		dependencies:  agent.NewDependencyManager(b.PluginGetter()),
 	}
 }
 
@@ -111,6 +122,9 @@ func (e *executor) Describe(ctx context.Context) (*api.NodeDescription, error) {
 		}
 	}
 
+	// TODO(dperny): don't ignore the error here
+	csiInfo, _ := e.Volumes().Plugins().NodeInfo(ctx)
+
 	description := &api.NodeDescription{
 		Hostname: info.Name,
 		Platform: &api.Platform{
@@ -127,6 +141,7 @@ func (e *executor) Describe(ctx context.Context) (*api.NodeDescription, error) {
 			MemoryBytes: info.MemTotal,
 			Generic:     convert.GenericResourcesToGRPC(info.GenericResources),
 		},
+		CSIInfo: csiInfo,
 	}
 
 	// Save the node information in the executor field
@@ -155,6 +170,40 @@ func (e *executor) Configure(ctx context.Context, node *api.Node) error {
 		}
 
 		attachments[na.Network.ID] = na.Addresses[0]
+	}
+
+	// discover which, if any, attachments have been removed.
+	//
+	// we aren't responsible directly for creating these networks. that is
+	// handled indirectly when a container using that network is created.
+	// however, when it comes time to remove the network, none of the relevant
+	// tasks may exist anymore. this means we should go ahead and try to remove
+	// any network we know to no longer be in use.
+
+	// removeAttachments maps the network ID to a boolean. This boolean
+	// indicates whether the attachment in question is totally removed (true),
+	// or has just had its IP changed (false)
+	removeAttachments := make(map[string]bool)
+
+	// the first time we Configure, nodeObj wil be nil, because it will not be
+	// set yet. in that case, skip this check.
+	if e.nodeObj != nil {
+		for _, na := range e.nodeObj.Attachments {
+			// same thing as above, check sanity of the attachments so we don't
+			// get a panic.
+			if na == nil || na.Network == nil || len(na.Addresses) == 0 {
+				logrus.WithField("NetworkAttachment", fmt.Sprintf("%#v", na)).
+					Warnf("skipping nil or malformed node network attachment entry")
+				continue
+			}
+
+			// now, check if the attachment exists and shares the same IP address.
+			if ip, ok := attachments[na.Network.ID]; !ok || na.Addresses[0] != ip {
+				// if the map entry exists, then the network still exists, and the
+				// IP must be what has changed
+				removeAttachments[na.Network.ID] = !ok
+			}
+		}
 	}
 
 	if (ingressNA == nil) && (node.Attachment != nil) && (len(node.Attachment.Addresses) > 0) {
@@ -196,6 +245,42 @@ func (e *executor) Configure(ctx context.Context, node *api.Node) error {
 	if err != nil {
 		return err
 	}
+
+	var (
+		activeEndpointsError *libnetwork.ActiveEndpointsError
+		errNoSuchNetwork     libnetwork.ErrNoSuchNetwork
+	)
+
+	// now, finally, remove any network LB attachments that we no longer have.
+	for nw, gone := range removeAttachments {
+		err := e.backend.DeleteManagedNetwork(nw)
+		switch {
+		case err == nil:
+			continue
+		case errors.As(err, &activeEndpointsError):
+			// this is the purpose of the boolean in the map. it's literally
+			// just to log an appropriate, informative error. i'm unsure if
+			// this can ever actually occur, but we need to know if it does.
+			if gone {
+				log.G(ctx).Warnf("network %s should be removed, but still has active attachments", nw)
+			} else {
+				log.G(ctx).Warnf(
+					"network %s should have its node LB IP changed, but cannot be removed because of active attachments",
+					nw,
+				)
+			}
+			continue
+		case errors.As(err, &errNoSuchNetwork):
+			// NoSuchNetworkError indicates the network is already gone.
+			continue
+		default:
+			log.G(ctx).Errorf("network %s remove failed: %v", nw, err)
+		}
+	}
+
+	// now update our copy of the node object, reset the attachment store, and
+	// return
+	e.nodeObj = node
 
 	return e.backend.GetAttachmentStore().ResetAttachments(attachments)
 }
@@ -273,6 +358,10 @@ func (e *executor) Secrets() exec.SecretsManager {
 
 func (e *executor) Configs() exec.ConfigsManager {
 	return e.dependencies.Configs()
+}
+
+func (e *executor) Volumes() exec.VolumesManager {
+	return e.dependencies.Volumes()
 }
 
 type sortedPlugins []api.PluginDescription
