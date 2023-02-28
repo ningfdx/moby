@@ -128,7 +128,6 @@ func (p *windowsParser) splitRawSpec(raw string, splitRegexp *regexp.Regexp) ([]
 			exists, isDir, _ := p.fi.fileInfo(matchgroups["destination"])
 			if exists && !isDir {
 				return nil, fmt.Errorf("file '%s' cannot be mapped. Only directories can be mapped on this platform", matchgroups["destination"])
-
 			}
 		}
 	}
@@ -416,20 +415,18 @@ func (p *windowsParser) ParseVolumesFrom(spec string) (string, string, error) {
 		return "", "", fmt.Errorf("volumes-from specification cannot be an empty string")
 	}
 
-	specParts := strings.SplitN(spec, ":", 2)
-	id := specParts[0]
-	mode := "rw"
+	id, mode, _ := strings.Cut(spec, ":")
+	if mode == "" {
+		return id, "rw", nil
+	}
 
-	if len(specParts) == 2 {
-		mode = specParts[1]
-		if !windowsValidMountMode(mode) {
-			return "", "", errInvalidMode(mode)
-		}
+	if !windowsValidMountMode(mode) {
+		return "", "", errInvalidMode(mode)
+	}
 
-		// Do not allow copy modes on volumes-from
-		if _, isSet := getCopyMode(mode, p.DefaultCopyMode()); isSet {
-			return "", "", errInvalidMode(mode)
-		}
+	// Do not allow copy modes on volumes-from
+	if _, isSet := getCopyMode(mode, p.DefaultCopyMode()); isSet {
+		return "", "", errInvalidMode(mode)
 	}
 	return id, mode, nil
 }

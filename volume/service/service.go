@@ -18,7 +18,6 @@ import (
 	"github.com/docker/docker/volume/service/opts"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
-	"golang.org/x/sync/singleflight"
 )
 
 type ds interface {
@@ -38,7 +37,6 @@ type VolumesService struct {
 	ds           ds
 	pruneRunning int32
 	eventLogger  VolumeEventLogger
-	usage        singleflight.Group
 }
 
 // NewVolumeService creates a new volume service
@@ -60,6 +58,10 @@ func (s *VolumesService) GetDriverList() []string {
 	return s.ds.GetDriverList()
 }
 
+// AnonymousLabel is the label used to indicate that a volume is anonymous
+// This is set automatically on a volume when a volume is created without a name specified, and as such an id is generated for it.
+const AnonymousLabel = "com.docker.volume.anonymous"
+
 // Create creates a volume
 // If the caller is creating this volume to be consumed immediately, it is
 // expected that the caller specifies a reference ID.
@@ -67,11 +69,12 @@ func (s *VolumesService) GetDriverList() []string {
 //
 // A good example for a reference ID is a container's ID.
 // When whatever is going to reference this volume is removed the caller should defeference the volume by calling `Release`.
-func (s *VolumesService) Create(ctx context.Context, name, driverName string, opts ...opts.CreateOption) (*volumetypes.Volume, error) {
+func (s *VolumesService) Create(ctx context.Context, name, driverName string, options ...opts.CreateOption) (*volumetypes.Volume, error) {
 	if name == "" {
 		name = stringid.GenerateRandomID()
+		options = append(options, opts.WithCreateLabel(AnonymousLabel, ""))
 	}
-	v, err := s.vs.Create(ctx, name, driverName, opts...)
+	v, err := s.vs.Create(ctx, name, driverName, options...)
 	if err != nil {
 		return nil, err
 	}
@@ -171,6 +174,8 @@ func (s *VolumesService) Remove(ctx context.Context, name string, rmOpts ...opts
 var acceptedPruneFilters = map[string]bool{
 	"label":  true,
 	"label!": true,
+	// All tells the filter to consider all volumes not just anonymous ones.
+	"all": true,
 }
 
 var acceptedListFilters = map[string]bool{
@@ -185,25 +190,14 @@ var acceptedListFilters = map[string]bool{
 // volumes with mount options are not really local even if they are using the
 // local driver.
 func (s *VolumesService) LocalVolumesSize(ctx context.Context) ([]*volumetypes.Volume, error) {
-	ch := s.usage.DoChan("LocalVolumesSize", func() (interface{}, error) {
-		ls, _, err := s.vs.Find(ctx, And(ByDriver(volume.DefaultDriverName), CustomFilter(func(v volume.Volume) bool {
-			dv, ok := v.(volume.DetailedVolume)
-			return ok && len(dv.Options()) == 0
-		})))
-		if err != nil {
-			return nil, err
-		}
-		return s.volumesToAPI(ctx, ls, calcSize(true)), nil
-	})
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	case res := <-ch:
-		if res.Err != nil {
-			return nil, res.Err
-		}
-		return res.Val.([]*volumetypes.Volume), nil
+	ls, _, err := s.vs.Find(ctx, And(ByDriver(volume.DefaultDriverName), CustomFilter(func(v volume.Volume) bool {
+		dv, ok := v.(volume.DetailedVolume)
+		return ok && len(dv.Options()) == 0
+	})))
+	if err != nil {
+		return nil, err
 	}
+	return s.volumesToAPI(ctx, ls, calcSize(true)), nil
 }
 
 // Prune removes (local) volumes which match the past in filter arguments.
@@ -214,6 +208,10 @@ func (s *VolumesService) Prune(ctx context.Context, filter filters.Args) (*types
 		return nil, errdefs.Conflict(errors.New("a prune operation is already running"))
 	}
 	defer atomic.StoreInt32(&s.pruneRunning, 0)
+
+	if err := withPrune(filter); err != nil {
+		return nil, err
+	}
 
 	by, err := filtersToBy(filter, acceptedPruneFilters)
 	if err != nil {

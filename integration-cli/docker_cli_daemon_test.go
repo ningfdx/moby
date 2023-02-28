@@ -35,10 +35,10 @@ import (
 	"github.com/docker/docker/opts"
 	testdaemon "github.com/docker/docker/testutil/daemon"
 	units "github.com/docker/go-units"
-	"github.com/docker/libtrust"
 	"github.com/moby/sys/mount"
 	"golang.org/x/sys/unix"
 	"gotest.tools/v3/assert"
+	is "gotest.tools/v3/assert/cmp"
 	"gotest.tools/v3/icmd"
 	"gotest.tools/v3/poll"
 )
@@ -106,12 +106,9 @@ func (s *DockerDaemonSuite) TestDaemonRestartWithVolumesRefs(c *testing.T) {
 		c.Fatal(err, out)
 	}
 
-	out, err := s.d.Cmd("inspect", "-f", "{{json .Mounts}}", "volrestarttest1")
-	assert.NilError(c, err, out)
-
-	if _, err := inspectMountPointJSON(out, "/foo"); err != nil {
-		c.Fatalf("Expected volume to exist: /foo, error: %v\n", err)
-	}
+	out, err := s.d.Cmd("inspect", "-f", `{{range .Mounts}}{{.Destination}}{{"\n"}}{{end}}`, "volrestarttest1")
+	assert.Check(c, err)
+	assert.Check(c, is.Contains(strings.Split(out, "\n"), "/foo"))
 }
 
 // #11008
@@ -171,7 +168,6 @@ func (s *DockerDaemonSuite) TestDaemonRestartUnlessStopped(c *testing.T) {
 
 	// both running
 	testRun(map[string]bool{"top1": true, "top2": true, "exit": true}, "After second daemon restart: ")
-
 }
 
 func (s *DockerDaemonSuite) TestDaemonRestartOnFailure(c *testing.T) {
@@ -182,7 +178,7 @@ func (s *DockerDaemonSuite) TestDaemonRestartOnFailure(c *testing.T) {
 
 	// wait test1 to stop
 	hostArgs := []string{"--host", s.d.Sock()}
-	err = waitInspectWithArgs("test1", "{{.State.Running}} {{.State.Restarting}}", "false false", 10*time.Second, hostArgs...)
+	err = daemon.WaitInspectWithArgs(dockerBinary, "test1", "{{.State.Running}} {{.State.Restarting}}", "false false", 10*time.Second, hostArgs...)
 	assert.NilError(c, err, "test1 should exit but not")
 
 	// record last start time
@@ -193,7 +189,7 @@ func (s *DockerDaemonSuite) TestDaemonRestartOnFailure(c *testing.T) {
 	s.d.Restart(c)
 
 	// test1 shouldn't restart at all
-	err = waitInspectWithArgs("test1", "{{.State.Running}} {{.State.Restarting}}", "false false", 0, hostArgs...)
+	err = daemon.WaitInspectWithArgs(dockerBinary, "test1", "{{.State.Running}} {{.State.Restarting}}", "false false", 0, hostArgs...)
 	assert.NilError(c, err, "test1 should exit but not")
 
 	// make sure test1 isn't restarted when daemon restart
@@ -237,7 +233,7 @@ func (s *DockerDaemonSuite) TestDaemonRestartWithIncreasedBasesize(c *testing.T)
 	var newBasesizeBytes int64 = 53687091200 // 50GB in bytes
 
 	if newBasesizeBytes < oldBasesizeBytes {
-		c.Skip(fmt.Sprintf("New base device size (%v) must be greater than (%s)", units.HumanSize(float64(newBasesizeBytes)), units.HumanSize(float64(oldBasesizeBytes))))
+		c.Skipf("New base device size (%v) must be greater than (%s)", units.HumanSize(float64(newBasesizeBytes)), units.HumanSize(float64(oldBasesizeBytes)))
 	}
 
 	err := s.d.RestartWithError("--storage-opt", fmt.Sprintf("dm.basesize=%d", newBasesizeBytes))
@@ -541,7 +537,7 @@ func (s *DockerDaemonSuite) TestDaemonAllocatesListeningPort(c *testing.T) {
 
 	cmdArgs := make([]string, 0, len(listeningPorts)*2)
 	for _, l := range listeningPorts {
-		cmdArgs = append(cmdArgs, "--tls=false", "--host", fmt.Sprintf("tcp://%s:%s", l.daemon, l.port))
+		cmdArgs = append(cmdArgs, "--tls=false", "--host", "tcp://"+net.JoinHostPort(l.daemon, l.port))
 	}
 
 	s.d.StartWithBusybox(c, cmdArgs...)
@@ -553,24 +549,6 @@ func (s *DockerDaemonSuite) TestDaemonAllocatesListeningPort(c *testing.T) {
 		} else if !strings.Contains(output, "port is already allocated") {
 			c.Fatalf("Expected port is already allocated error: %q", output)
 		}
-	}
-}
-
-func (s *DockerDaemonSuite) TestDaemonKeyGeneration(c *testing.T) {
-	// TODO: skip or update for Windows daemon
-	os.Remove("/etc/docker/key.json")
-	c.Setenv("DOCKER_ALLOW_SCHEMA1_PUSH_DONOTUSE", "1")
-	s.d.Start(c)
-	s.d.Stop(c)
-
-	k, err := libtrust.LoadKeyFile("/etc/docker/key.json")
-	if err != nil {
-		c.Fatalf("Error opening key file")
-	}
-	kid := k.KeyID()
-	// Test Key ID is a valid fingerprint (e.g. QQXN:JY5W:TBXI:MK3X:GX6P:PD5D:F56N:NHCS:LVRZ:JA46:R24J:XEFF)
-	if len(kid) != 59 {
-		c.Fatalf("Bad key ID: %s", kid)
 	}
 }
 
@@ -978,7 +956,6 @@ func (s *DockerDaemonSuite) TestDaemonLinksIpTablesRulesWhenLinkAndUnlink(c *tes
 }
 
 func (s *DockerDaemonSuite) TestDaemonUlimitDefaults(c *testing.T) {
-
 	s.d.StartWithBusybox(c, "--default-ulimit", "nofile=42:42", "--default-ulimit", "nproc=1024:1024")
 
 	out, err := s.d.Cmd("run", "--ulimit", "nproc=2048", "--name=test", "busybox", "/bin/sh", "-c", "echo $(ulimit -n); echo $(ulimit -u)")
@@ -1199,60 +1176,6 @@ func (s *DockerDaemonSuite) TestDaemonUnixSockCleanedUp(c *testing.T) {
 
 	if _, err := os.Stat(sockPath); err == nil || !os.IsNotExist(err) {
 		c.Fatal("unix socket is not cleaned up")
-	}
-}
-
-func (s *DockerDaemonSuite) TestDaemonWithWrongkey(c *testing.T) {
-	type Config struct {
-		Crv string `json:"crv"`
-		D   string `json:"d"`
-		Kid string `json:"kid"`
-		Kty string `json:"kty"`
-		X   string `json:"x"`
-		Y   string `json:"y"`
-	}
-
-	os.Remove("/etc/docker/key.json")
-	c.Setenv("DOCKER_ALLOW_SCHEMA1_PUSH_DONOTUSE", "1")
-	s.d.Start(c)
-	s.d.Stop(c)
-
-	config := &Config{}
-	bytes, err := os.ReadFile("/etc/docker/key.json")
-	if err != nil {
-		c.Fatalf("Error reading key.json file: %s", err)
-	}
-
-	// byte[] to Data-Struct
-	if err := json.Unmarshal(bytes, &config); err != nil {
-		c.Fatalf("Error Unmarshal: %s", err)
-	}
-
-	// replace config.Kid with the fake value
-	config.Kid = "VSAJ:FUYR:X3H2:B2VZ:KZ6U:CJD5:K7BX:ZXHY:UZXT:P4FT:MJWG:HRJ4"
-
-	// NEW Data-Struct to byte[]
-	newBytes, err := json.Marshal(&config)
-	if err != nil {
-		c.Fatalf("Error Marshal: %s", err)
-	}
-
-	// write back
-	if err := os.WriteFile("/etc/docker/key.json", newBytes, 0400); err != nil {
-		c.Fatalf("Error os.WriteFile: %s", err)
-	}
-
-	defer os.Remove("/etc/docker/key.json")
-
-	if err := s.d.StartWithError(); err == nil {
-		c.Fatalf("It should not be successful to start daemon with wrong key: %v", err)
-	}
-
-	content, err := s.d.ReadLogFile()
-	assert.Assert(c, err == nil)
-
-	if !strings.Contains(string(content), "Public Key ID does not match") {
-		c.Fatalf("Missing KeyID message from daemon logs: %s", string(content))
 	}
 }
 
@@ -1991,7 +1914,6 @@ func (s *DockerDaemonSuite) TestDaemonRestartWithKilledRunningContainer(t *testi
 	if out != "143" {
 		t.Fatalf("Expected exit code '%s' got '%s' for container '%s'\n", "143", out, cid)
 	}
-
 }
 
 // os.Kill should kill daemon ungracefully, leaving behind live containers.
@@ -2384,7 +2306,7 @@ func (s *DockerDaemonSuite) TestRunWithRuntimeFromConfigFile(c *testing.T) {
 	// Run with "vm"
 	out, err = s.d.Cmd("run", "--rm", "--runtime=vm", "busybox", "ls")
 	assert.ErrorContains(c, err, "", out)
-	assert.Assert(c, strings.Contains(out, "/usr/local/bin/vm-manager: no such file or directory"))
+	assert.Assert(c, is.Contains(out, "/usr/local/bin/vm-manager: no such file or directory"))
 	// Reset config to only have the default
 	config = `
 {
@@ -2404,11 +2326,11 @@ func (s *DockerDaemonSuite) TestRunWithRuntimeFromConfigFile(c *testing.T) {
 	// Run with "oci"
 	out, err = s.d.Cmd("run", "--rm", "--runtime=oci", "busybox", "ls")
 	assert.ErrorContains(c, err, "", out)
-	assert.Assert(c, strings.Contains(out, "Unknown runtime specified oci"))
+	assert.Assert(c, is.Contains(out, "unknown or invalid runtime name: oci"))
 	// Start previously created container with oci
 	out, err = s.d.Cmd("start", "oci-runtime-ls")
 	assert.ErrorContains(c, err, "", out)
-	assert.Assert(c, strings.Contains(out, "Unknown runtime specified oci"))
+	assert.Assert(c, is.Contains(out, "unknown or invalid runtime name: oci"))
 	// Check that we can't override the default runtime
 	config = `
 {
@@ -2426,7 +2348,7 @@ func (s *DockerDaemonSuite) TestRunWithRuntimeFromConfigFile(c *testing.T) {
 
 	content, err := s.d.ReadLogFile()
 	assert.NilError(c, err)
-	assert.Assert(c, strings.Contains(string(content), `file configuration validation failed: runtime name 'runc' is reserved`))
+	assert.Assert(c, is.Contains(string(content), `file configuration validation failed: runtime name 'runc' is reserved`))
 	// Check that we can select a default runtime
 	config = `
 {
@@ -2451,7 +2373,7 @@ func (s *DockerDaemonSuite) TestRunWithRuntimeFromConfigFile(c *testing.T) {
 
 	out, err = s.d.Cmd("run", "--rm", "busybox", "ls")
 	assert.ErrorContains(c, err, "", out)
-	assert.Assert(c, strings.Contains(out, "/usr/local/bin/vm-manager: no such file or directory"))
+	assert.Assert(c, is.Contains(out, "/usr/local/bin/vm-manager: no such file or directory"))
 	// Run with default runtime explicitly
 	out, err = s.d.Cmd("run", "--rm", "--runtime=runc", "busybox", "ls")
 	assert.NilError(c, err, out)
@@ -2475,7 +2397,7 @@ func (s *DockerDaemonSuite) TestRunWithRuntimeFromCommandLine(c *testing.T) {
 	// Run with "vm"
 	out, err = s.d.Cmd("run", "--rm", "--runtime=vm", "busybox", "ls")
 	assert.ErrorContains(c, err, "", out)
-	assert.Assert(c, strings.Contains(out, "/usr/local/bin/vm-manager: no such file or directory"))
+	assert.Assert(c, is.Contains(out, "/usr/local/bin/vm-manager: no such file or directory"))
 	// Start a daemon without any extra runtimes
 	s.d.Stop(c)
 	s.d.StartWithBusybox(c)
@@ -2487,25 +2409,25 @@ func (s *DockerDaemonSuite) TestRunWithRuntimeFromCommandLine(c *testing.T) {
 	// Run with "oci"
 	out, err = s.d.Cmd("run", "--rm", "--runtime=oci", "busybox", "ls")
 	assert.ErrorContains(c, err, "", out)
-	assert.Assert(c, strings.Contains(out, "Unknown runtime specified oci"))
+	assert.Assert(c, is.Contains(out, "unknown or invalid runtime name: oci"))
 	// Start previously created container with oci
 	out, err = s.d.Cmd("start", "oci-runtime-ls")
 	assert.ErrorContains(c, err, "", out)
-	assert.Assert(c, strings.Contains(out, "Unknown runtime specified oci"))
+	assert.Assert(c, is.Contains(out, "unknown or invalid runtime name: oci"))
 	// Check that we can't override the default runtime
 	s.d.Stop(c)
 	assert.Assert(c, s.d.StartWithError("--add-runtime", "runc=my-runc") != nil)
 
 	content, err := s.d.ReadLogFile()
 	assert.NilError(c, err)
-	assert.Assert(c, strings.Contains(string(content), `runtime name 'runc' is reserved`))
+	assert.Assert(c, is.Contains(string(content), `runtime name 'runc' is reserved`))
 	// Check that we can select a default runtime
 	s.d.Stop(c)
 	s.d.StartWithBusybox(c, "--default-runtime=vm", "--add-runtime", "oci=runc", "--add-runtime", "vm=/usr/local/bin/vm-manager")
 
 	out, err = s.d.Cmd("run", "--rm", "busybox", "ls")
 	assert.ErrorContains(c, err, "", out)
-	assert.Assert(c, strings.Contains(out, "/usr/local/bin/vm-manager: no such file or directory"))
+	assert.Assert(c, is.Contains(out, "/usr/local/bin/vm-manager: no such file or directory"))
 	// Run with default runtime explicitly
 	out, err = s.d.Cmd("run", "--rm", "--runtime=runc", "busybox", "ls")
 	assert.NilError(c, err, out)

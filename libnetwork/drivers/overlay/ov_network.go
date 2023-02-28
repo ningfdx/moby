@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -23,7 +22,6 @@ import (
 	"github.com/docker/docker/libnetwork/osl"
 	"github.com/docker/docker/libnetwork/resolvconf"
 	"github.com/docker/docker/libnetwork/types"
-	"github.com/docker/docker/pkg/reexec"
 	"github.com/sirupsen/logrus"
 	"github.com/vishvananda/netlink"
 	"github.com/vishvananda/netlink/nl"
@@ -75,55 +73,13 @@ type network struct {
 }
 
 func init() {
-	reexec.Register("set-default-vlan", setDefaultVlan)
-}
-
-func setDefaultVlan() {
-	if len(os.Args) < 3 {
-		logrus.Error("insufficient number of arguments")
-		os.Exit(1)
-	}
-
+	// Lock main() to the initial thread to exclude the goroutines executing
+	// func (*network).watchMiss() or func setDefaultVLAN() from being
+	// scheduled onto that thread. Changes to the network namespace of the
+	// initial thread alter /proc/self/ns/net, which would break any code
+	// which (incorrectly) assumes that that file is a handle to the network
+	// namespace for the thread it is currently executing on.
 	runtime.LockOSThread()
-	defer runtime.UnlockOSThread()
-
-	nsPath := os.Args[1]
-	ns, err := netns.GetFromPath(nsPath)
-	if err != nil {
-		logrus.Errorf("overlay namespace get failed, %v", err)
-		os.Exit(1)
-	}
-	if err = netns.Set(ns); err != nil {
-		logrus.Errorf("setting into overlay namespace failed, %v", err)
-		os.Exit(1)
-	}
-
-	// make sure the sysfs mount doesn't propagate back
-	if err = unix.Unshare(unix.CLONE_NEWNS); err != nil {
-		logrus.Errorf("unshare failed, %v", err)
-		os.Exit(1)
-	}
-
-	flag := unix.MS_PRIVATE | unix.MS_REC
-	if err = unix.Mount("", "/", "", uintptr(flag), ""); err != nil {
-		logrus.Errorf("root mount failed, %v", err)
-		os.Exit(1)
-	}
-
-	if err = unix.Mount("sysfs", "/sys", "sysfs", 0, ""); err != nil {
-		logrus.Errorf("mounting sysfs failed, %v", err)
-		os.Exit(1)
-	}
-
-	brName := os.Args[2]
-	path := filepath.Join("/sys/class/net", brName, "bridge/default_pvid")
-	data := []byte{'0', '\n'}
-
-	if err = os.WriteFile(path, data, 0644); err != nil {
-		logrus.Errorf("enabling default vlan on bridge %s failed %v", brName, err)
-		os.Exit(1)
-	}
-	os.Exit(0)
 }
 
 func (d *driver) NetworkAllocate(id string, option map[string]string, ipV4Data, ipV6Data []driverapi.IPAMData) (map[string]string, error) {
@@ -414,24 +370,24 @@ func (n *network) destroySandbox() {
 }
 
 func populateVNITbl() {
-	filepath.Walk(filepath.Dir(osl.GenerateKey("walk")),
+	filepath.WalkDir(filepath.Dir(osl.GenerateKey("walk")),
 		// NOTE(cpuguy83): The linter picked up on the fact that this walk function was not using this error argument
 		// That seems wrong... however I'm not familiar with this code or if that error matters
-		func(path string, info os.FileInfo, _ error) error {
+		func(path string, _ os.DirEntry, _ error) error {
 			_, fname := filepath.Split(path)
 
 			if len(strings.Split(fname, "-")) <= 1 {
 				return nil
 			}
 
-			ns, err := netns.GetFromPath(path)
+			n, err := netns.GetFromPath(path)
 			if err != nil {
 				logrus.Errorf("Could not open namespace path %s during vni population: %v", path, err)
 				return nil
 			}
-			defer ns.Close()
+			defer n.Close()
 
-			nlh, err := netlink.NewHandleAt(ns, unix.NETLINK_ROUTE)
+			nlh, err := netlink.NewHandleAt(n, unix.NETLINK_ROUTE)
 			if err != nil {
 				logrus.Errorf("Could not open netlink handle during vni population for ns %s: %v", path, err)
 				return nil
@@ -523,8 +479,8 @@ func (n *network) getBridgeNamePrefix(s *subnet) string {
 func checkOverlap(nw *net.IPNet) error {
 	var nameservers []string
 
-	if rc, err := resolvconf.Get(); err == nil {
-		nameservers = resolvconf.GetNameserversAsCIDR(rc.Content)
+	if rc, err := os.ReadFile(resolvconf.Path()); err == nil {
+		nameservers = resolvconf.GetNameserversAsCIDR(rc)
 	}
 
 	if err := netutils.CheckNameserverOverlaps(nameservers, nw); err != nil {
@@ -539,29 +495,26 @@ func checkOverlap(nw *net.IPNet) error {
 }
 
 func (n *network) restoreSubnetSandbox(s *subnet, brName, vxlanName string) error {
-	sbox := n.sbox
-
 	// restore overlay osl sandbox
-	Ifaces := make(map[string][]osl.IfaceOption)
-	brIfaceOption := make([]osl.IfaceOption, 2)
-	brIfaceOption = append(brIfaceOption, sbox.InterfaceOptions().Address(s.gwIP))
-	brIfaceOption = append(brIfaceOption, sbox.InterfaceOptions().Bridge(true))
-	Ifaces[brName+"+br"] = brIfaceOption
-
-	err := sbox.Restore(Ifaces, nil, nil, nil)
-	if err != nil {
+	ifaces := map[string][]osl.IfaceOption{
+		brName + "+br": {
+			n.sbox.InterfaceOptions().Address(s.gwIP),
+			n.sbox.InterfaceOptions().Bridge(true),
+		},
+	}
+	if err := n.sbox.Restore(ifaces, nil, nil, nil); err != nil {
 		return err
 	}
 
-	Ifaces = make(map[string][]osl.IfaceOption)
-	vxlanIfaceOption := make([]osl.IfaceOption, 1)
-	vxlanIfaceOption = append(vxlanIfaceOption, sbox.InterfaceOptions().Master(brName))
-	Ifaces[vxlanName+"+vxlan"] = vxlanIfaceOption
-	return sbox.Restore(Ifaces, nil, nil, nil)
+	ifaces = map[string][]osl.IfaceOption{
+		vxlanName + "+vxlan": {
+			n.sbox.InterfaceOptions().Master(brName),
+		},
+	}
+	return n.sbox.Restore(ifaces, nil, nil, nil)
 }
 
 func (n *network) setupSubnetSandbox(s *subnet, brName, vxlanName string) error {
-
 	if hostMode {
 		// Try to delete stale bridge interface if it exists
 		if err := deleteInterface(brName); err != nil {
@@ -634,32 +587,66 @@ func (n *network) setupSubnetSandbox(s *subnet, brName, vxlanName string) error 
 		return fmt.Errorf("vxlan interface creation failed for subnet %q: %v", s.subnetIP.String(), err)
 	}
 
-	if !hostMode {
-		var name string
-		for _, i := range sbox.Info().Interfaces() {
-			if i.Bridge() {
-				name = i.DstName()
-			}
-		}
-		cmd := &exec.Cmd{
-			Path:   reexec.Self(),
-			Args:   []string{"set-default-vlan", sbox.Key(), name},
-			Stdout: os.Stdout,
-			Stderr: os.Stderr,
-		}
-		if err := cmd.Run(); err != nil {
-			// not a fatal error
-			logrus.Errorf("reexec to set bridge default vlan failed %v", err)
-		}
-	}
-
 	if hostMode {
-		if err := addFilters(n.id[:12], brName); err != nil {
-			return err
+		return addFilters(n.id[:12], brName)
+	}
+
+	if err := setDefaultVLAN(sbox); err != nil {
+		// not a fatal error
+		logrus.WithError(err).Error("set bridge default vlan failed")
+	}
+	return nil
+}
+
+func setDefaultVLAN(sbox osl.Sandbox) error {
+	var brName string
+	for _, i := range sbox.Info().Interfaces() {
+		if i.Bridge() {
+			brName = i.DstName()
 		}
 	}
 
-	return nil
+	// IFLA_BR_VLAN_DEFAULT_PVID was added in Linux v4.4 (see torvalds/linux@0f963b7), so we can't use netlink for
+	// setting this until Docker drops support for CentOS/RHEL 7 (kernel 3.10, eol date: 2024-06-30).
+	var innerErr error
+	err := sbox.InvokeFunc(func() {
+		// Contrary to what the sysfs(5) man page says, the entries of /sys/class/net
+		// represent the networking devices visible in the network namespace of the
+		// process which mounted the sysfs filesystem, irrespective of the network
+		// namespace of the process accessing the directory. Remount sysfs in order to
+		// see the network devices in sbox's network namespace, making sure the mount
+		// doesn't propagate back.
+		//
+		// The Linux implementation of (osl.Sandbox).InvokeFunc() runs the function in a
+		// dedicated goroutine. The effects of unshare(CLONE_NEWNS) on a thread cannot
+		// be reverted so the thread needs to be terminated once the goroutine is
+		// finished.
+		runtime.LockOSThread()
+		if err := unix.Unshare(unix.CLONE_NEWNS); err != nil {
+			innerErr = os.NewSyscallError("unshare", err)
+			return
+		}
+		if err := unix.Mount("", "/", "", unix.MS_SLAVE|unix.MS_REC, ""); err != nil {
+			innerErr = &os.PathError{Op: "mount", Path: "/", Err: err}
+			return
+		}
+		if err := unix.Mount("sysfs", "/sys", "sysfs", 0, ""); err != nil {
+			innerErr = &os.PathError{Op: "mount", Path: "/sys", Err: err}
+			return
+		}
+
+		path := filepath.Join("/sys/class/net", brName, "bridge/default_pvid")
+		data := []byte{'0', '\n'}
+
+		if err := os.WriteFile(path, data, 0o644); err != nil {
+			innerErr = fmt.Errorf("failed to enable default vlan on bridge %s: %w", brName, err)
+			return
+		}
+	})
+	if err != nil {
+		return err
+	}
+	return innerErr
 }
 
 // Must be called with the network lock
@@ -684,8 +671,8 @@ func (n *network) initSubnetSandbox(s *subnet, restore bool) error {
 }
 
 func (n *network) cleanupStaleSandboxes() {
-	filepath.Walk(filepath.Dir(osl.GenerateKey("walk")),
-		func(path string, info os.FileInfo, err error) error {
+	filepath.WalkDir(filepath.Dir(osl.GenerateKey("walk")),
+		func(path string, _ os.DirEntry, _ error) error {
 			_, fname := filepath.Split(path)
 
 			pList := strings.Split(fname, "-")
@@ -782,20 +769,36 @@ func (n *network) initSandbox(restore bool) error {
 func (n *network) watchMiss(nlSock *nl.NetlinkSocket, nsPath string) {
 	// With the new version of the netlink library the deserialize function makes
 	// requests about the interface of the netlink message. This can succeed only
-	// if this go routine is in the target namespace. For this reason following we
-	// lock the thread on that namespace
-	runtime.LockOSThread()
-	defer runtime.UnlockOSThread()
+	// if this go routine is in the target namespace.
+	origNs, err := netns.Get()
+	if err != nil {
+		logrus.WithError(err).Error("failed to get the initial network namespace")
+		return
+	}
+	defer origNs.Close()
 	newNs, err := netns.GetFromPath(nsPath)
 	if err != nil {
 		logrus.WithError(err).Errorf("failed to get the namespace %s", nsPath)
 		return
 	}
 	defer newNs.Close()
+
+	runtime.LockOSThread()
 	if err = netns.Set(newNs); err != nil {
 		logrus.WithError(err).Errorf("failed to enter the namespace %s", nsPath)
+		runtime.UnlockOSThread()
 		return
 	}
+	defer func() {
+		if err := netns.Set(origNs); err != nil {
+			logrus.WithError(err).Error("failed to restore the thread's initial network namespace")
+			// The error is only fatal for the current thread. Keep this
+			// goroutine locked to the thread to make the runtime replace it
+			// with a clean thread once this goroutine terminates.
+		} else {
+			runtime.UnlockOSThread()
+		}
+	}()
 	for {
 		msgs, _, err := nlSock.Receive()
 		if err != nil {
@@ -1076,7 +1079,7 @@ func (n *network) releaseVxlanID() ([]uint32, error) {
 }
 
 func (n *network) obtainVxlanID(s *subnet) error {
-	//return if the subnet already has a vxlan id assigned
+	// return if the subnet already has a vxlan id assigned
 	if n.vxlanID(s) != 0 {
 		return nil
 	}

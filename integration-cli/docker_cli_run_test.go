@@ -89,7 +89,6 @@ func (s *DockerCLIRunSuite) TestRunLookupGoogleDNS(c *testing.T) {
 	} else {
 		dockerCmd(c, "run", "busybox", "nslookup", "google.com")
 	}
-
 }
 
 // the exit code should be 0
@@ -355,7 +354,6 @@ func (s *DockerCLIRunSuite) TestRunWithDaemonFlags(c *testing.T) {
 
 // Regression test for #4979
 func (s *DockerCLIRunSuite) TestRunWithVolumesFromExited(c *testing.T) {
-
 	var (
 		out      string
 		exitCode int
@@ -786,7 +784,7 @@ func (s *DockerCLIRunSuite) TestRunUserByIDZero(c *testing.T) {
 	if err != nil {
 		c.Fatal(err, out)
 	}
-	if !strings.Contains(out, "uid=0(root) gid=0(root) groups=10(wheel)") {
+	if !strings.Contains(out, "uid=0(root) gid=0(root) groups=0(root),10(wheel)") {
 		c.Fatalf("expected daemon user got %s", out)
 	}
 }
@@ -1086,7 +1084,7 @@ func (s *DockerCLIRunSuite) TestRunGroupAdd(c *testing.T) {
 	testRequires(c, DaemonIsLinux)
 	out, _ := dockerCmd(c, "run", "--group-add=audio", "--group-add=staff", "--group-add=777", "busybox", "sh", "-c", "id")
 
-	groupsList := "uid=0(root) gid=0(root) groups=10(wheel),29(audio),50(staff),777"
+	groupsList := "uid=0(root) gid=0(root) groups=0(root),10(wheel),29(audio),50(staff),777"
 	if actual := strings.Trim(out, "\r\n"); actual != groupsList {
 		c.Fatalf("expected output %s received %s", groupsList, actual)
 	}
@@ -1945,11 +1943,8 @@ func (s *DockerCLIRunSuite) TestRunCidFileCleanupIfEmpty(c *testing.T) {
 	defer os.RemoveAll(tmpDir)
 	tmpCidFile := path.Join(tmpDir, "cid")
 
+	// This must be an image that has no CMD or ENTRYPOINT set
 	image := "emptyfs"
-	if testEnv.OSType == "windows" {
-		// Windows can't support an emptyfs image. Just use the regular Windows image
-		image = testEnv.PlatformDefaults.BaseImage
-	}
 	out, _, err := dockerCmdWithError("run", "--cidfile", tmpCidFile, image)
 	if err == nil {
 		c.Fatalf("Run without command must fail. out=%s", out)
@@ -3948,7 +3943,7 @@ func (s *DockerCLIRunSuite) TestRunRm(c *testing.T) {
 	name := "miss-me-when-im-gone"
 	cli.DockerCmd(c, "run", "--name="+name, "--rm", "busybox")
 
-	cli.Docker(cli.Inspect(name), cli.Format(".name")).Assert(c, icmd.Expected{
+	cli.Docker(cli.Args("inspect", name), cli.Format(".name")).Assert(c, icmd.Expected{
 		ExitCode: 1,
 		Err:      "No such object: " + name,
 	})
@@ -3960,7 +3955,7 @@ func (s *DockerCLIRunSuite) TestRunRmPre125Api(c *testing.T) {
 	envs := appendBaseEnv(os.Getenv("DOCKER_TLS_VERIFY") != "", "DOCKER_API_VERSION=1.24")
 	cli.Docker(cli.Args("run", "--name="+name, "--rm", "busybox"), cli.WithEnvironmentVariables(envs...)).Assert(c, icmd.Success)
 
-	cli.Docker(cli.Inspect(name), cli.Format(".name")).Assert(c, icmd.Expected{
+	cli.Docker(cli.Args("inspect", name), cli.Format(".name")).Assert(c, icmd.Expected{
 		ExitCode: 1,
 		Err:      "No such object: " + name,
 	})

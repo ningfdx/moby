@@ -3,7 +3,6 @@ package distribution // import "github.com/docker/docker/distribution"
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -17,7 +16,6 @@ import (
 
 	"github.com/docker/distribution/manifest/schema1"
 	"github.com/docker/distribution/reference"
-	"github.com/docker/docker/api/types"
 	registrytypes "github.com/docker/docker/api/types/registry"
 	"github.com/docker/docker/image"
 	"github.com/docker/docker/registry"
@@ -210,7 +208,7 @@ func TestFormatPlatform(t *testing.T) {
 		}
 		matches, _ := regexp.MatchString("windows.* [0-9]", result)
 		if !matches {
-			t.Fatal(fmt.Sprintf("expected formatPlatform to show windows platform with a version, but got '%s'", result))
+			t.Fatalf("expected formatPlatform to show windows platform with a version, but got '%s'", result)
 		}
 	}
 }
@@ -352,7 +350,7 @@ func testNewPuller(t *testing.T, rawurl string) *puller {
 	imagePullConfig := &ImagePullConfig{
 		Config: Config{
 			MetaHeaders: http.Header{},
-			AuthConfig: &types.AuthConfig{
+			AuthConfig: &registrytypes.AuthConfig{
 				RegistryToken: secretRegistryToken,
 			},
 		},

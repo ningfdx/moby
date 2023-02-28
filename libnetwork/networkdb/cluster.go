@@ -200,7 +200,6 @@ func (nDB *NetworkDB) retryJoin(ctx context.Context, members []string) {
 			return
 		}
 	}
-
 }
 
 func (nDB *NetworkDB) clusterJoin(members []string) error {
@@ -397,7 +396,7 @@ func (nDB *NetworkDB) reapTableEntries() {
 	// The lock is taken at the beginning of the cycle and the deletion is inline
 	for _, nid := range nodeNetworks {
 		nDB.Lock()
-		nDB.indexes[byNetwork].WalkPrefix("/"+nid, func(path string, v interface{}) bool {
+		nDB.indexes[byNetwork].Root().WalkPrefix([]byte("/"+nid), func(path []byte, v interface{}) bool {
 			// timeCompensation compensate in case the lock took some time to be released
 			timeCompensation := time.Since(cycleStart)
 			entry, ok := v.(*entry)
@@ -412,7 +411,7 @@ func (nDB *NetworkDB) reapTableEntries() {
 				return false
 			}
 
-			params := strings.Split(path[1:], "/")
+			params := strings.Split(string(path[1:]), "/")
 			nid := params[0]
 			tname := params[1]
 			key := params[2]
@@ -474,13 +473,13 @@ func (nDB *NetworkDB) gossip() {
 
 		msgs := broadcastQ.GetBroadcasts(compoundOverhead, bytesAvail)
 		// Collect stats and print the queue info, note this code is here also to have a view of the queues empty
-		network.qMessagesSent += len(msgs)
+		network.qMessagesSent.Add(int64(len(msgs)))
 		if printStats {
+			msent := network.qMessagesSent.Swap(0)
 			logrus.Infof("NetworkDB stats %v(%v) - netID:%s leaving:%t netPeers:%d entries:%d Queue qLen:%d netMsg/s:%d",
 				nDB.config.Hostname, nDB.config.NodeID,
-				nid, network.leaving, broadcastQ.NumNodes(), network.entriesNumber, broadcastQ.NumQueued(),
-				network.qMessagesSent/int((nDB.config.StatsPrintPeriod/time.Second)))
-			network.qMessagesSent = 0
+				nid, network.leaving, broadcastQ.NumNodes(), network.entriesNumber.Load(), broadcastQ.NumQueued(),
+				msent/int64((nDB.config.StatsPrintPeriod/time.Second)))
 		}
 
 		if len(msgs) == 0 {
@@ -630,7 +629,7 @@ func (nDB *NetworkDB) bulkSyncNode(networks []string, node string, unsolicited b
 	}
 
 	for _, nid := range networks {
-		nDB.indexes[byNetwork].WalkPrefix("/"+nid, func(path string, v interface{}) bool {
+		nDB.indexes[byNetwork].Root().WalkPrefix([]byte("/"+nid), func(path []byte, v interface{}) bool {
 			entry, ok := v.(*entry)
 			if !ok {
 				return false
@@ -641,7 +640,7 @@ func (nDB *NetworkDB) bulkSyncNode(networks []string, node string, unsolicited b
 				eType = TableEventTypeDelete
 			}
 
-			params := strings.Split(path[1:], "/")
+			params := strings.Split(string(path[1:]), "/")
 			tEvent := TableEvent{
 				Type:      eType,
 				LTime:     entry.ltime,

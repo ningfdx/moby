@@ -222,10 +222,8 @@ func (cm *cacheManager) GetByBlob(ctx context.Context, desc ocispecs.Descriptor,
 
 	id := identity.NewID()
 	snapshotID := chainID.String()
-	blobOnly := true
 	if link != nil {
 		snapshotID = link.getSnapshotID()
-		blobOnly = link.getBlobOnly()
 		go link.Release(context.TODO())
 	}
 
@@ -289,7 +287,7 @@ func (cm *cacheManager) GetByBlob(ctx context.Context, desc ocispecs.Descriptor,
 	rec.queueChainID(chainID)
 	rec.queueBlobChainID(blobChainID)
 	rec.queueSnapshotID(snapshotID)
-	rec.queueBlobOnly(blobOnly)
+	rec.queueBlobOnly(true)
 	rec.queueMediaType(desc.MediaType)
 	rec.queueBlobSize(desc.Size)
 	rec.appendURLs(desc.URLs)
@@ -301,7 +299,14 @@ func (cm *cacheManager) GetByBlob(ctx context.Context, desc ocispecs.Descriptor,
 
 	cm.records[id] = rec
 
-	return rec.ref(true, descHandlers, nil), nil
+	ref := rec.ref(true, descHandlers, nil)
+	if s := unlazySessionOf(opts...); s != nil {
+		if err := ref.unlazy(ctx, ref.descHandlers, ref.progress, s, true); err != nil {
+			return nil, err
+		}
+	}
+
+	return ref, nil
 }
 
 // init loads all snapshots from metadata state and tries to load the records

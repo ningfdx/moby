@@ -10,7 +10,6 @@ import (
 	"github.com/docker/docker/libnetwork/netlabel"
 	"github.com/docker/docker/libnetwork/ns"
 	"github.com/docker/docker/libnetwork/options"
-	"github.com/docker/docker/libnetwork/osl"
 	"github.com/docker/docker/libnetwork/types"
 	"github.com/docker/docker/pkg/parsers/kernel"
 	"github.com/docker/docker/pkg/stringid"
@@ -19,10 +18,9 @@ import (
 
 // CreateNetwork the network for the specified driver type
 func (d *driver) CreateNetwork(nid string, option map[string]interface{}, nInfo driverapi.NetworkInfo, ipV4Data, ipV6Data []driverapi.IPAMData) error {
-	defer osl.InitOSContext()()
 	kv, err := kernel.GetKernelVersion()
 	if err != nil {
-		return fmt.Errorf("Failed to check kernel version for %s driver support: %v", ipvlanType, err)
+		return fmt.Errorf("failed to check kernel version for ipvlan driver support: %v", err)
 	}
 	// ensure Kernel version is >= v4.2 for ipvlan support
 	if kv.Kernel < ipvlanKernelVer || (kv.Kernel == ipvlanKernelVer && kv.Major < ipvlanMajorVer) {
@@ -38,25 +36,8 @@ func (d *driver) CreateNetwork(nid string, option map[string]interface{}, nInfo 
 	if err != nil {
 		return err
 	}
-	config.ID = nid
-	err = config.processIPAM(nid, ipV4Data, ipV6Data)
-	if err != nil {
-		return err
-	}
-	// verify the ipvlan mode from -o ipvlan_mode option
-	switch config.IpvlanMode {
-	case "", modeL2:
-		// default to ipvlan L2 mode if -o ipvlan_mode is empty
-		config.IpvlanMode = modeL2
-	case modeL3:
-		config.IpvlanMode = modeL3
-	default:
-		return fmt.Errorf("requested ipvlan mode '%s' is not valid, 'l2' mode is the ipvlan driver default", config.IpvlanMode)
-	}
-	// loopback is not a valid parent link
-	if config.Parent == "lo" {
-		return fmt.Errorf("loopback interface is not a valid %s parent link", ipvlanType)
-	}
+	config.processIPAM(ipV4Data, ipV6Data)
+
 	// if parent interface not specified, create a dummy type link to use named dummy+net_id
 	if config.Parent == "" {
 		config.Parent = getDummyName(stringid.TruncateID(config.ID))
@@ -69,6 +50,7 @@ func (d *driver) CreateNetwork(nid string, option map[string]interface{}, nInfo 
 	if foundExisting {
 		return types.InternalMaskableErrorf("restoring existing network %s", config.ID)
 	}
+
 	// update persistent db, rollback on fail
 	err = d.storeUpdate(config)
 	if err != nil {
@@ -104,7 +86,7 @@ func (d *driver) createNetwork(config *configuration) (bool, error) {
 			}
 			config.CreatedSlaveLink = true
 
-			// notify the user in logs they have limited communications
+			// notify the user in logs that they have limited communications
 			logrus.Debugf("Empty -o parent= flags limit communications to other containers inside of network: %s",
 				config.Parent)
 		} else {
@@ -132,9 +114,8 @@ func (d *driver) createNetwork(config *configuration) (bool, error) {
 	return foundExisting, nil
 }
 
-// DeleteNetwork the network for the specified driver type
+// DeleteNetwork deletes the network for the specified driver type
 func (d *driver) DeleteNetwork(nid string) error {
-	defer osl.InitOSContext()()
 	n := d.network(nid)
 	if n == nil {
 		return fmt.Errorf("network id %s not found", nid)
@@ -181,7 +162,7 @@ func (d *driver) DeleteNetwork(nid string) error {
 	return nil
 }
 
-// parseNetworkOptions parse docker network options
+// parseNetworkOptions parses docker network options
 func parseNetworkOptions(id string, option options.Generic) (*configuration, error) {
 	var (
 		err    error
@@ -198,34 +179,60 @@ func parseNetworkOptions(id string, option options.Generic) (*configuration, err
 			config.Internal = true
 		}
 	}
+
+	// verify the ipvlan mode from -o ipvlan_mode option
+	switch config.IpvlanMode {
+	case "":
+		// default to ipvlan L2 mode if -o ipvlan_mode is empty
+		config.IpvlanMode = modeL2
+	case modeL2, modeL3, modeL3S:
+		// valid option
+	default:
+		return nil, fmt.Errorf("requested ipvlan mode '%s' is not valid, 'l2' mode is the ipvlan driver default", config.IpvlanMode)
+	}
+
+	// verify the ipvlan flag from -o ipvlan_flag option
+	switch config.IpvlanFlag {
+	case "":
+		// default to bridge if -o ipvlan_flag is empty
+		config.IpvlanFlag = flagBridge
+	case flagBridge, flagPrivate, flagVepa:
+		// valid option
+	default:
+		return nil, fmt.Errorf("requested ipvlan flag '%s' is not valid, 'bridge' is the ipvlan driver default", config.IpvlanFlag)
+	}
+
+	// loopback is not a valid parent link
+	if config.Parent == "lo" {
+		return nil, fmt.Errorf("loopback interface is not a valid ipvlan parent link")
+	}
+
+	config.ID = id
 	return config, nil
 }
 
 // parseNetworkGenericOptions parse generic driver docker network options
 func parseNetworkGenericOptions(data interface{}) (*configuration, error) {
-	var (
-		err    error
-		config *configuration
-	)
 	switch opt := data.(type) {
 	case *configuration:
-		config = opt
+		return opt, nil
 	case map[string]string:
-		config = &configuration{}
-		err = config.fromOptions(opt)
+		return newConfigFromLabels(opt), nil
 	case options.Generic:
-		var opaqueConfig interface{}
-		if opaqueConfig, err = options.GenerateFromModel(opt, config); err == nil {
-			config = opaqueConfig.(*configuration)
+		var config *configuration
+		opaqueConfig, err := options.GenerateFromModel(opt, config)
+		if err != nil {
+			return nil, err
 		}
+		return opaqueConfig.(*configuration), nil
 	default:
-		err = types.BadRequestErrorf("unrecognized network configuration format: %v", opt)
+		return nil, types.BadRequestErrorf("unrecognized network configuration format: %v", opt)
 	}
-	return config, err
 }
 
-// fromOptions binds the generic options to networkConfiguration to cache
-func (config *configuration) fromOptions(labels map[string]string) error {
+// newConfigFromLabels creates a new configuration from the given labels.
+func newConfigFromLabels(labels map[string]string) *configuration {
+	config := &configuration{}
 	for label, value := range labels {
 		switch label {
 		case parentOpt:
@@ -234,30 +241,27 @@ func (config *configuration) fromOptions(labels map[string]string) error {
 		case driverModeOpt:
 			// parse driver option '-o ipvlan_mode'
 			config.IpvlanMode = value
+		case driverFlagOpt:
+			// parse driver option '-o ipvlan_flag'
+			config.IpvlanFlag = value
 		}
 	}
-	return nil
+
+	return config
 }
 
 // processIPAM parses v4 and v6 IP information and binds it to the network configuration
-func (config *configuration) processIPAM(id string, ipamV4Data, ipamV6Data []driverapi.IPAMData) error {
-	if len(ipamV4Data) > 0 {
-		for _, ipd := range ipamV4Data {
-			s := &ipv4Subnet{
-				SubnetIP: ipd.Pool.String(),
-				GwIP:     ipd.Gateway.String(),
-			}
-			config.Ipv4Subnets = append(config.Ipv4Subnets, s)
-		}
+func (config *configuration) processIPAM(ipamV4Data, ipamV6Data []driverapi.IPAMData) {
+	for _, ipd := range ipamV4Data {
+		config.Ipv4Subnets = append(config.Ipv4Subnets, &ipSubnet{
+			SubnetIP: ipd.Pool.String(),
+			GwIP:     ipd.Gateway.String(),
+		})
 	}
-	if len(ipamV6Data) > 0 {
-		for _, ipd := range ipamV6Data {
-			s := &ipv6Subnet{
-				SubnetIP: ipd.Pool.String(),
-				GwIP:     ipd.Gateway.String(),
-			}
-			config.Ipv6Subnets = append(config.Ipv6Subnets, s)
-		}
+	for _, ipd := range ipamV6Data {
+		config.Ipv6Subnets = append(config.Ipv6Subnets, &ipSubnet{
+			SubnetIP: ipd.Pool.String(),
+			GwIP:     ipd.Gateway.String(),
+		})
 	}
-	return nil
 }

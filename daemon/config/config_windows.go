@@ -1,12 +1,16 @@
 package config // import "github.com/docker/docker/daemon/config"
 
 import (
+	"os"
+	"path/filepath"
+
 	"github.com/docker/docker/api/types"
 )
 
 const (
-	// This is used by the `default-runtime` flag in dockerd as the default value.
-	// On windows we'd prefer to keep this empty so the value is auto-detected based on other options.
+	// StockRuntimeName is used by the 'default-runtime' flag in dockerd as the
+	// default value. On Windows keep this empty so the value is auto-detected
+	// based on other options.
 	StockRuntimeName = ""
 )
 
@@ -60,4 +64,11 @@ func (conf *Config) ValidatePlatformConfig() error {
 // IsRootless returns conf.Rootless on Linux but false on Windows
 func (conf *Config) IsRootless() bool {
 	return false
+}
+
+func setPlatformDefaults(cfg *Config) error {
+	cfg.Root = filepath.Join(os.Getenv("programdata"), "docker")
+	cfg.ExecRoot = filepath.Join(os.Getenv("programdata"), "docker", "exec-root")
+	cfg.Pidfile = filepath.Join(cfg.Root, "docker.pid")
+	return nil
 }

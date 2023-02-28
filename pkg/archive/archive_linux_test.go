@@ -15,13 +15,14 @@ import (
 
 // setupOverlayTestDir creates files in a directory with overlay whiteouts
 // Tree layout
-// .
-// ├── d1     # opaque, 0700
-// │   └── f1 # empty file, 0600
-// ├── d2     # opaque, 0750
-// │   └── f1 # empty file, 0660
-// └── d3     # 0700
-//     └── f1 # whiteout, 0644
+//
+//	.
+//	├── d1     # opaque, 0700
+//	│   └── f1 # empty file, 0600
+//	├── d2     # opaque, 0750
+//	│   └── f1 # empty file, 0660
+//	└── d3     # 0700
+//	    └── f1 # whiteout, 0644
 func setupOverlayTestDir(t *testing.T, src string) {
 	skip.If(t, os.Getuid() != 0, "skipping test that requires root")
 	skip.If(t, userns.RunningInUserNS(), "skipping test that requires initial userns (trusted.overlay.opaque xattr cannot be set in userns, even with Ubuntu kernel)")
@@ -60,7 +61,6 @@ func checkOpaqueness(t *testing.T, path string, opaque string) {
 	if string(xattrOpaque) != opaque {
 		t.Fatalf("Unexpected opaque value: %q, expected %q", string(xattrOpaque), opaque)
 	}
-
 }
 
 func checkOverlayWhiteout(t *testing.T, path string) {
@@ -86,9 +86,8 @@ func checkFileMode(t *testing.T, path string, perm os.FileMode) {
 }
 
 func TestOverlayTarUntar(t *testing.T) {
-	oldmask, err := system.Umask(0)
-	assert.NilError(t, err)
-	defer system.Umask(oldmask)
+	restore := overrideUmask(0)
+	defer restore()
 
 	src, err := os.MkdirTemp("", "docker-test-overlay-tar-src")
 	assert.NilError(t, err)
@@ -125,9 +124,8 @@ func TestOverlayTarUntar(t *testing.T) {
 }
 
 func TestOverlayTarAUFSUntar(t *testing.T) {
-	oldmask, err := system.Umask(0)
-	assert.NilError(t, err)
-	defer system.Umask(oldmask)
+	restore := overrideUmask(0)
+	defer restore()
 
 	src, err := os.MkdirTemp("", "docker-test-overlay-tar-src")
 	assert.NilError(t, err)

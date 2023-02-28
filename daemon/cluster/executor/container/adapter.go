@@ -16,6 +16,8 @@ import (
 	"github.com/docker/docker/api/types/backend"
 	containertypes "github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/events"
+	imagetypes "github.com/docker/docker/api/types/image"
+	"github.com/docker/docker/api/types/registry"
 	containerpkg "github.com/docker/docker/container"
 	"github.com/docker/docker/daemon"
 	"github.com/docker/docker/daemon/cluster/convert"
@@ -74,7 +76,10 @@ func (c *containerAdapter) pullImage(ctx context.Context) error {
 	named, err := reference.ParseNormalizedNamed(spec.Image)
 	if err == nil {
 		if _, ok := named.(reference.Canonical); ok {
-			_, err := c.imageBackend.GetImage(spec.Image, nil)
+			_, err := c.imageBackend.GetImage(ctx, spec.Image, imagetypes.GetImageOpts{})
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return err
+			}
 			if err == nil {
 				return nil
 			}
@@ -87,7 +92,7 @@ func (c *containerAdapter) pullImage(ctx context.Context) error {
 		encodedAuthConfig = spec.PullOptions.RegistryAuth
 	}
 
-	authConfig := &types.AuthConfig{}
+	authConfig := &registry.AuthConfig{}
 	if encodedAuthConfig != "" {
 		if err := json.NewDecoder(base64.NewDecoder(base64.URLEncoding, strings.NewReader(encodedAuthConfig))).Decode(authConfig); err != nil {
 			logrus.Warnf("invalid authconfig: %v", err)
@@ -285,7 +290,7 @@ func (c *containerAdapter) waitForDetach(ctx context.Context) error {
 func (c *containerAdapter) create(ctx context.Context) error {
 	var cr containertypes.CreateResponse
 	var err error
-	if cr, err = c.backend.CreateManagedContainer(types.ContainerCreateConfig{
+	if cr, err = c.backend.CreateManagedContainer(ctx, types.ContainerCreateConfig{
 		Name:       c.container.name(),
 		Config:     c.container.config(),
 		HostConfig: c.container.hostConfig(c.dependencies.Volumes()),
@@ -352,7 +357,7 @@ func (c *containerAdapter) start(ctx context.Context) error {
 		return err
 	}
 
-	return c.backend.ContainerStart(c.container.name(), nil, "", "")
+	return c.backend.ContainerStart(ctx, c.container.name(), nil, "", "")
 }
 
 func (c *containerAdapter) inspect(ctx context.Context) (types.ContainerJSON, error) {
@@ -455,7 +460,6 @@ func (c *containerAdapter) createVolumes(ctx context.Context) error {
 			// It returns an error if the driver name is different - that is a valid error
 			return err
 		}
-
 	}
 
 	return nil

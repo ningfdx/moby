@@ -13,6 +13,14 @@ keywords: "API, Docker, rcli, REST, documentation"
      will be rejected.
 -->
 
+## v1.43 API changes
+
+[Docker Engine API v1.43](https://docs.docker.com/engine/api/v1.43/) documentation
+
+* `POST /containers/create` now accepts `Annotations` as part of `HostConfig`.
+  Can be used to attach arbitrary metadata to the container, which will also be
+  passed to the runtime when the container is started.
+
 ## v1.42 API changes
 
 [Docker Engine API v1.42](https://docs.docker.com/engine/api/v1.42/) documentation
@@ -53,6 +61,18 @@ keywords: "API, Docker, rcli, REST, documentation"
   if they are not set.
 * `GET /info` now omits the `KernelMemory` and `KernelMemoryTCP` if they are not
   supported by the host or host's configuration (if cgroups v2 are in use).
+* `GET /_ping` and `HEAD /_ping` now return `Builder-Version` by default.
+  This header contains the default builder to use, and is a recommendation as
+  advertised by the daemon. However, it is up to the client to choose which builder
+  to use.
+
+  The default value on Linux is version "2" (BuildKit), but the daemon can be
+  configured to recommend version "1" (classic Builder). Windows does not yet
+  support BuildKit for native Windows images, and uses "1" (classic builder) as
+  a default.
+
+  This change is not versioned, and affects all API versions if the daemon has
+  this patch. 
 * `GET /_ping` and `HEAD /_ping` now return a `Swarm` header, which allows a
   client to detect if Swarm is enabled on the daemon, without having to call
   additional endpoints.
@@ -81,6 +101,10 @@ keywords: "API, Docker, rcli, REST, documentation"
   volume (CNI). This option can only be used if the daemon is a Swarm manager.
   The Volume response on creation now also can contain a `ClusterVolume` field
   with information about the created volume.
+* The `BuildCache.Parent` field, as returned by `GET /system/df` is deprecated
+  and is now omitted. API versions before v1.42 continue to include this field.
+* `GET /system/df` now includes a new `Parents` field, for "build-cache" records,
+  which contains a list of parent IDs for the build-cache record.
 * Volume information returned by `GET /volumes/{name}`, `GET /volumes` and
   `GET /system/df` can now contain a `ClusterVolume` if the volume is a cluster
   volume (requires the daemon to be a Swarm manager).
@@ -103,6 +127,7 @@ keywords: "API, Docker, rcli, REST, documentation"
   is set with a non-matching mount Type.
 * `POST /containers/{id}/exec` now accepts an optional `ConsoleSize` parameter.
   It allows to set the console size of the executed process immediately when it's created.
+* `POST /volumes/prune` will now only prune "anonymous" volumes (volumes which were not given a name) by default. A new filter parameter `all` can be set to a truth-y value (`true`, `1`) to get the old behavior.
 
 ## v1.41 API changes
 
@@ -136,6 +161,22 @@ keywords: "API, Docker, rcli, REST, documentation"
   to limit the maximum number of PIDs.
 * `GET /tasks` now  returns `Pids` in `TaskTemplate.Resources.Limits`.
 * `GET /tasks/{id}` now  returns `Pids` in `TaskTemplate.Resources.Limits`.
+* `POST /containers/create` now accepts a `platform` query parameter in the format
+  `os[/arch[/variant]]`.
+
+  When set, the daemon checks if the requested image is present in the local image
+  cache with the given OS and Architecture, and otherwise returns a `404` status.
+
+  If the option is _not_ set, the host's native OS and Architecture are used to
+  look up the image in the image cache. However, if no platform is passed and the
+  given image _does_ exist in the local image cache, but its OS or architecture
+  do not match, the container is created with the available image, and a warning
+  is added to the `Warnings` field in the response, for example;
+
+      WARNING: The requested image's platform (linux/arm64/v8) does not
+               match the detected host platform (linux/amd64) and no
+               specific platform was requested
+
 * `POST /containers/create` on Linux now accepts the `HostConfig.CgroupnsMode` property.
   Set the property to `host` to create the container in the daemon's cgroup namespace, or
   `private` to create the container in its own private cgroup namespace.  The per-daemon

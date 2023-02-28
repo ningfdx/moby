@@ -48,17 +48,21 @@ func (s *containerRouter) postCommit(ctx context.Context, w http.ResponseWriter,
 		return err
 	}
 
+	ref, err := httputils.RepoTagReference(r.Form.Get("repo"), r.Form.Get("tag"))
+	if err != nil {
+		return errdefs.InvalidParameter(err)
+	}
+
 	commitCfg := &backend.CreateImageConfig{
 		Pause:   pause,
-		Repo:    r.Form.Get("repo"),
-		Tag:     r.Form.Get("tag"),
+		Tag:     ref,
 		Author:  r.Form.Get("author"),
 		Comment: r.Form.Get("comment"),
 		Config:  config,
 		Changes: r.Form["changes"],
 	}
 
-	imgID, err := s.backend.CreateImageFromContainer(r.Form.Get("container"), commitCfg)
+	imgID, err := s.backend.CreateImageFromContainer(ctx, r.Form.Get("container"), commitCfg)
 	if err != nil {
 		return err
 	}
@@ -91,7 +95,7 @@ func (s *containerRouter) getContainersJSON(ctx context.Context, w http.Response
 		config.Limit = limit
 	}
 
-	containers, err := s.backend.Containers(config)
+	containers, err := s.backend.Containers(ctx, config)
 	if err != nil {
 		return err
 	}
@@ -214,7 +218,7 @@ func (s *containerRouter) postContainersStart(ctx context.Context, w http.Respon
 
 	checkpoint := r.Form.Get("checkpoint")
 	checkpointDir := r.Form.Get("checkpoint-dir")
-	if err := s.backend.ContainerStart(vars["name"], hostConfig, checkpoint, checkpointDir); err != nil {
+	if err := s.backend.ContainerStart(ctx, vars["name"], hostConfig, checkpoint, checkpointDir); err != nil {
 		return err
 	}
 
@@ -559,6 +563,11 @@ func (s *containerRouter) postContainersCreate(ctx context.Context, w http.Respo
 		hostConfig.ConsoleSize = [2]uint{0, 0}
 	}
 
+	if hostConfig != nil && versions.LessThan(version, "1.43") {
+		// Ignore Annotations because it was added in API v1.43.
+		hostConfig.Annotations = nil
+	}
+
 	var platform *specs.Platform
 	if versions.GreaterThanOrEqualTo(version, "1.41") {
 		if v := r.Form.Get("platform"); v != "" {
@@ -578,7 +587,7 @@ func (s *containerRouter) postContainersCreate(ctx context.Context, w http.Respo
 		hostConfig.PidsLimit = nil
 	}
 
-	ccr, err := s.backend.ContainerCreate(types.ContainerCreateConfig{
+	ccr, err := s.backend.ContainerCreate(ctx, types.ContainerCreateConfig{
 		Name:             name,
 		Config:           config,
 		HostConfig:       hostConfig,

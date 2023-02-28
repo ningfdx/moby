@@ -3,6 +3,7 @@ package volume
 import (
 	"context"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -11,10 +12,12 @@ import (
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/volume"
+	clientpkg "github.com/docker/docker/client"
 	"github.com/docker/docker/integration/internal/container"
 	"github.com/docker/docker/testutil/request"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"gotest.tools/v3/assert"
+	"gotest.tools/v3/assert/cmp"
 	is "gotest.tools/v3/assert/cmp"
 )
 
@@ -43,7 +46,7 @@ func TestVolumesCreateAndList(t *testing.T) {
 	}
 	assert.Check(t, is.DeepEqual(vol, expected, cmpopts.EquateEmpty()))
 
-	volList, err := client.VolumeList(ctx, filters.Args{})
+	volList, err := client.VolumeList(ctx, volume.ListOptions{})
 	assert.NilError(t, err)
 	assert.Assert(t, len(volList.Volumes) > 0)
 
@@ -102,6 +105,21 @@ func TestVolumesInspect(t *testing.T) {
 	createdAt, err := time.Parse(time.RFC3339, strings.TrimSpace(inspected.CreatedAt))
 	assert.NilError(t, err)
 	assert.Check(t, createdAt.Unix()-now.Unix() < 60, "CreatedAt (%s) exceeds creation time (%s) 60s", createdAt, now)
+
+	// update atime and mtime for the "_data" directory (which would happen during volume initialization)
+	modifiedAt := time.Now().Local().Add(5 * time.Hour)
+	err = os.Chtimes(inspected.Mountpoint, modifiedAt, modifiedAt)
+	assert.NilError(t, err)
+
+	inspected, err = client.VolumeInspect(ctx, vol.Name)
+	assert.NilError(t, err)
+
+	createdAt2, err := time.Parse(time.RFC3339, strings.TrimSpace(inspected.CreatedAt))
+	assert.NilError(t, err)
+
+	// Check that CreatedAt didn't change after updating atime and mtime of the "_data" directory
+	// Related issue: #38274
+	assert.Equal(t, createdAt, createdAt2)
 }
 
 // TestVolumesInvalidJSON tests that POST endpoints that expect a body return
@@ -164,4 +182,55 @@ func getPrefixAndSlashFromDaemonPlatform() (prefix, slash string) {
 		return "c:", `\`
 	}
 	return "", "/"
+}
+
+func TestVolumePruneAnonymous(t *testing.T) {
+	defer setupTest(t)()
+
+	client := testEnv.APIClient()
+	ctx := context.Background()
+
+	// Create an anonymous volume
+	v, err := client.VolumeCreate(ctx, volume.CreateOptions{})
+	assert.NilError(t, err)
+
+	// Create a named volume
+	vNamed, err := client.VolumeCreate(ctx, volume.CreateOptions{
+		Name: "test",
+	})
+	assert.NilError(t, err)
+
+	// Prune anonymous volumes
+	pruneReport, err := client.VolumesPrune(ctx, filters.Args{})
+	assert.NilError(t, err)
+	assert.Check(t, is.Equal(len(pruneReport.VolumesDeleted), 1))
+	assert.Check(t, is.Equal(pruneReport.VolumesDeleted[0], v.Name))
+
+	_, err = client.VolumeInspect(ctx, vNamed.Name)
+	assert.NilError(t, err)
+
+	// Prune all volumes
+	_, err = client.VolumeCreate(ctx, volume.CreateOptions{})
+	assert.NilError(t, err)
+
+	pruneReport, err = client.VolumesPrune(ctx, filters.NewArgs(filters.Arg("all", "1")))
+	assert.NilError(t, err)
+	assert.Check(t, is.Equal(len(pruneReport.VolumesDeleted), 2))
+
+	// Validate that older API versions still have the old behavior of pruning all local volumes
+	clientOld, err := clientpkg.NewClientWithOpts(clientpkg.FromEnv, clientpkg.WithVersion("1.41"))
+	assert.NilError(t, err)
+	defer clientOld.Close()
+	assert.Equal(t, clientOld.ClientVersion(), "1.41")
+
+	v, err = client.VolumeCreate(ctx, volume.CreateOptions{})
+	assert.NilError(t, err)
+	vNamed, err = client.VolumeCreate(ctx, volume.CreateOptions{Name: "test-api141"})
+	assert.NilError(t, err)
+
+	pruneReport, err = clientOld.VolumesPrune(ctx, filters.Args{})
+	assert.NilError(t, err)
+	assert.Check(t, is.Equal(len(pruneReport.VolumesDeleted), 2))
+	assert.Check(t, cmp.Contains(pruneReport.VolumesDeleted, v.Name))
+	assert.Check(t, cmp.Contains(pruneReport.VolumesDeleted, vNamed.Name))
 }

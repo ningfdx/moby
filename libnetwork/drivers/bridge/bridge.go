@@ -9,10 +9,8 @@ import (
 	"net"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strconv"
 	"sync"
-	"syscall"
 
 	"github.com/docker/docker/libnetwork/datastore"
 	"github.com/docker/docker/libnetwork/discoverapi"
@@ -22,7 +20,7 @@ import (
 	"github.com/docker/docker/libnetwork/netutils"
 	"github.com/docker/docker/libnetwork/ns"
 	"github.com/docker/docker/libnetwork/options"
-	"github.com/docker/docker/libnetwork/osl"
+	"github.com/docker/docker/libnetwork/portallocator"
 	"github.com/docker/docker/libnetwork/portmapper"
 	"github.com/docker/docker/libnetwork/types"
 	"github.com/sirupsen/logrus"
@@ -32,7 +30,7 @@ import (
 const (
 	networkType                = "bridge"
 	vethPrefix                 = "veth"
-	vethLen                    = 7
+	vethLen                    = len(vethPrefix) + 7
 	defaultContainerVethPrefix = "eth"
 	maxAllocatePortAttempts    = 10
 )
@@ -143,7 +141,7 @@ type bridgeNetwork struct {
 }
 
 type driver struct {
-	config            *configuration
+	config            configuration
 	natChain          *iptables.ChainInfo
 	filterChain       *iptables.ChainInfo
 	isolationChain1   *iptables.ChainInfo
@@ -156,16 +154,20 @@ type driver struct {
 	store             datastore.DataStore
 	nlh               *netlink.Handle
 	configNetwork     sync.Mutex
+	portAllocator     *portallocator.PortAllocator // Overridable for tests.
 	sync.Mutex
 }
 
 // New constructs a new bridge driver
 func newDriver() *driver {
-	return &driver{networks: map[string]*bridgeNetwork{}, config: &configuration{}}
+	return &driver{
+		networks:      map[string]*bridgeNetwork{},
+		portAllocator: portallocator.Get(),
+	}
 }
 
-// Init registers a new instance of bridge driver
-func Init(dc driverapi.DriverCallback, config map[string]interface{}) error {
+// Register registers a new instance of bridge driver.
+func Register(r driverapi.Registerer, config map[string]interface{}) error {
 	d := newDriver()
 	if err := d.configure(config); err != nil {
 		return err
@@ -175,7 +177,7 @@ func Init(dc driverapi.DriverCallback, config map[string]interface{}) error {
 		DataScope:         datastore.LocalScope,
 		ConnectivityScope: datastore.LocalScope,
 	}
-	return dc.RegisterDriver(networkType, d, c)
+	return r.RegisterDriver(networkType, d, c)
 }
 
 // Validate performs a static validation on the network configuration parameters.
@@ -349,7 +351,7 @@ func (n *bridgeNetwork) isolateNetwork(enable bool) error {
 
 func (d *driver) configure(option map[string]interface{}) error {
 	var (
-		config            *configuration
+		config            configuration
 		err               error
 		natChain          *iptables.ChainInfo
 		filterChain       *iptables.ChainInfo
@@ -361,20 +363,17 @@ func (d *driver) configure(option map[string]interface{}) error {
 		isolationChain2V6 *iptables.ChainInfo
 	)
 
-	genericData, ok := option[netlabel.GenericData]
-	if !ok || genericData == nil {
-		return nil
-	}
-
-	switch opt := genericData.(type) {
+	switch opt := option[netlabel.GenericData].(type) {
 	case options.Generic:
 		opaqueConfig, err := options.GenerateFromModel(opt, &configuration{})
 		if err != nil {
 			return err
 		}
-		config = opaqueConfig.(*configuration)
+		config = *opaqueConfig.(*configuration)
 	case *configuration:
-		config = opt
+		config = *opt
+	case nil:
+		// No GenericData option set. Use defaults.
 	default:
 		return &ErrInvalidDriverConfig{}
 	}
@@ -671,8 +670,6 @@ func (d *driver) checkConflict(config *networkConfiguration) error {
 }
 
 func (d *driver) createNetwork(config *networkConfiguration) (err error) {
-	defer osl.InitOSContext()()
-
 	// Initialize handle when needed
 	d.Lock()
 	if d.nlh == nil {
@@ -691,8 +688,8 @@ func (d *driver) createNetwork(config *networkConfiguration) (err error) {
 		id:           config.ID,
 		endpoints:    make(map[string]*bridgeEndpoint),
 		config:       config,
-		portMapper:   portmapper.New(d.config.UserlandProxyPath),
-		portMapperV6: portmapper.New(d.config.UserlandProxyPath),
+		portMapper:   portmapper.NewWithPortAllocator(d.portAllocator, d.config.UserlandProxyPath),
+		portMapperV6: portmapper.NewWithPortAllocator(d.portAllocator, d.config.UserlandProxyPath),
 		bridge:       bridgeIface,
 		driver:       d,
 	}
@@ -802,7 +799,6 @@ func (d *driver) createNetwork(config *networkConfiguration) (err error) {
 }
 
 func (d *driver) DeleteNetwork(nid string) error {
-
 	d.configNetwork.Lock()
 	defer d.configNetwork.Unlock()
 
@@ -812,7 +808,6 @@ func (d *driver) DeleteNetwork(nid string) error {
 func (d *driver) deleteNetwork(nid string) error {
 	var err error
 
-	defer osl.InitOSContext()()
 	// Get network handler and remove it from driver
 	d.Lock()
 	n, ok := d.networks[nid]
@@ -881,62 +876,27 @@ func (d *driver) deleteNetwork(nid string) error {
 }
 
 func addToBridge(nlh *netlink.Handle, ifaceName, bridgeName string) error {
-	link, err := nlh.LinkByName(ifaceName)
+	lnk, err := nlh.LinkByName(ifaceName)
 	if err != nil {
 		return fmt.Errorf("could not find interface %s: %v", ifaceName, err)
 	}
-	if err = nlh.LinkSetMaster(link,
-		&netlink.Bridge{LinkAttrs: netlink.LinkAttrs{Name: bridgeName}}); err != nil {
-		logrus.Debugf("Failed to add %s to bridge via netlink.Trying ioctl: %v", ifaceName, err)
-		iface, err := net.InterfaceByName(ifaceName)
-		if err != nil {
-			return fmt.Errorf("could not find network interface %s: %v", ifaceName, err)
-		}
-
-		master, err := net.InterfaceByName(bridgeName)
-		if err != nil {
-			return fmt.Errorf("could not find bridge %s: %v", bridgeName, err)
-		}
-
-		return ioctlAddToBridge(iface, master)
+	if err := nlh.LinkSetMaster(lnk, &netlink.Bridge{LinkAttrs: netlink.LinkAttrs{Name: bridgeName}}); err != nil {
+		logrus.WithError(err).Errorf("Failed to add %s to bridge via netlink", ifaceName)
+		return err
 	}
 	return nil
 }
 
 func setHairpinMode(nlh *netlink.Handle, link netlink.Link, enable bool) error {
 	err := nlh.LinkSetHairpin(link, enable)
-	if err != nil && err != syscall.EINVAL {
-		// If error is not EINVAL something else went wrong, bail out right away
+	if err != nil {
 		return fmt.Errorf("unable to set hairpin mode on %s via netlink: %v",
 			link.Attrs().Name, err)
 	}
-
-	// Hairpin mode successfully set up
-	if err == nil {
-		return nil
-	}
-
-	// The netlink method failed with EINVAL which is probably because of an older
-	// kernel. Try one more time via the sysfs method.
-	path := filepath.Join("/sys/class/net", link.Attrs().Name, "brport/hairpin_mode")
-
-	var val []byte
-	if enable {
-		val = []byte{'1', '\n'}
-	} else {
-		val = []byte{'0', '\n'}
-	}
-
-	if err := os.WriteFile(path, val, 0644); err != nil {
-		return fmt.Errorf("unable to set hairpin mode on %s via sysfs: %v", link.Attrs().Name, err)
-	}
-
 	return nil
 }
 
 func (d *driver) CreateEndpoint(nid, eid string, ifInfo driverapi.InterfaceInfo, epOptions map[string]interface{}) error {
-	defer osl.InitOSContext()()
-
 	if ifInfo == nil {
 		return errors.New("invalid interface info passed")
 	}
@@ -1122,8 +1082,6 @@ func (d *driver) CreateEndpoint(nid, eid string, ifInfo driverapi.InterfaceInfo,
 func (d *driver) DeleteEndpoint(nid, eid string) error {
 	var err error
 
-	defer osl.InitOSContext()()
-
 	// Get the network handler and make sure it exists
 	d.Lock()
 	n, ok := d.networks[nid]
@@ -1243,8 +1201,6 @@ func (d *driver) EndpointOperInfo(nid, eid string) (map[string]interface{}, erro
 
 // Join method is invoked when a Sandbox is attached to an endpoint.
 func (d *driver) Join(nid, eid string, sboxKey string, jinfo driverapi.JoinInfo, options map[string]interface{}) error {
-	defer osl.InitOSContext()()
-
 	network, err := d.getNetwork(nid)
 	if err != nil {
 		return err
@@ -1289,8 +1245,6 @@ func (d *driver) Join(nid, eid string, sboxKey string, jinfo driverapi.JoinInfo,
 
 // Leave method is invoked when a Sandbox detaches from an endpoint.
 func (d *driver) Leave(nid, eid string) error {
-	defer osl.InitOSContext()()
-
 	network, err := d.getNetwork(nid)
 	if err != nil {
 		return types.InternalMaskableErrorf("%s", err)
@@ -1315,8 +1269,6 @@ func (d *driver) Leave(nid, eid string) error {
 }
 
 func (d *driver) ProgramExternalConnectivity(nid, eid string, options map[string]interface{}) error {
-	defer osl.InitOSContext()()
-
 	network, err := d.getNetwork(nid)
 	if err != nil {
 		return err
@@ -1352,10 +1304,9 @@ func (d *driver) ProgramExternalConnectivity(nid, eid string, options map[string
 		}
 	}()
 
-	// Clean the connection tracker state of the host for the
-	// specific endpoint. This is needed because some flows may be
-	// bound to the local proxy and won't bre redirect to the new endpoints.
-	clearEndpointConnections(d.nlh, endpoint)
+	// Clean the connection tracker state of the host for the specific endpoint. This is needed because some flows may
+	// be bound to the local proxy, or to the host (for UDP packets), and won't be redirected to the new endpoints.
+	clearConntrackEntries(d.nlh, endpoint)
 
 	if err = d.storeUpdate(endpoint); err != nil {
 		return fmt.Errorf("failed to update bridge endpoint %.7s to store: %v", endpoint.id, err)
@@ -1369,8 +1320,6 @@ func (d *driver) ProgramExternalConnectivity(nid, eid string, options map[string
 }
 
 func (d *driver) RevokeExternalConnectivity(nid, eid string) error {
-	defer osl.InitOSContext()()
-
 	network, err := d.getNetwork(nid)
 	if err != nil {
 		return err
@@ -1392,12 +1341,10 @@ func (d *driver) RevokeExternalConnectivity(nid, eid string) error {
 
 	endpoint.portMapping = nil
 
-	// Clean the connection tracker state of the host for the specific endpoint
-	// The host kernel keeps track of the connections (TCP and UDP), so if a new endpoint gets the same IP of
-	// this one (that is going down), is possible that some of the packets would not be routed correctly inside
-	// the new endpoint
-	// Deeper details: https://github.com/docker/docker/issues/8795
-	clearEndpointConnections(d.nlh, endpoint)
+	// Clean the connection tracker state of the host for the specific endpoint. This is a precautionary measure to
+	// avoid new endpoints getting the same IP address to receive unexpected packets due to bad conntrack state leading
+	// to bad NATing.
+	clearConntrackEntries(d.nlh, endpoint)
 
 	if err = d.storeUpdate(endpoint); err != nil {
 		return fmt.Errorf("failed to update bridge endpoint %.7s to store: %v", endpoint.id, err)

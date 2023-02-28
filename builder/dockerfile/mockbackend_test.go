@@ -13,7 +13,6 @@ import (
 	containerpkg "github.com/docker/docker/container"
 	"github.com/docker/docker/image"
 	"github.com/docker/docker/layer"
-	"github.com/docker/docker/pkg/containerfs"
 )
 
 // MockBackend implements the builder.Backend interface for unit testing
@@ -28,7 +27,7 @@ func (m *MockBackend) ContainerAttachRaw(cID string, stdin io.ReadCloser, stdout
 	return nil
 }
 
-func (m *MockBackend) ContainerCreateIgnoreImagesArgsEscaped(config types.ContainerCreateConfig) (container.CreateResponse, error) {
+func (m *MockBackend) ContainerCreateIgnoreImagesArgsEscaped(ctx context.Context, config types.ContainerCreateConfig) (container.CreateResponse, error) {
 	if m.containerCreateFunc != nil {
 		return m.containerCreateFunc(config)
 	}
@@ -39,7 +38,7 @@ func (m *MockBackend) ContainerRm(name string, config *types.ContainerRmConfig) 
 	return nil
 }
 
-func (m *MockBackend) CommitBuildStep(c backend.CommitConfig) (image.ID, error) {
+func (m *MockBackend) CommitBuildStep(ctx context.Context, c backend.CommitConfig) (image.ID, error) {
 	if m.commitFunc != nil {
 		return m.commitFunc(c)
 	}
@@ -50,7 +49,7 @@ func (m *MockBackend) ContainerKill(containerID string, sig string) error {
 	return nil
 }
 
-func (m *MockBackend) ContainerStart(containerID string, hostConfig *container.HostConfig, checkpoint string, checkpointDir string) error {
+func (m *MockBackend) ContainerStart(ctx context.Context, containerID string, hostConfig *container.HostConfig, checkpoint string, checkpointDir string) error {
 	return nil
 }
 
@@ -74,11 +73,11 @@ func (m *MockBackend) GetImageAndReleasableLayer(ctx context.Context, refOrID st
 	return &mockImage{id: "theid"}, &mockLayer{}, nil
 }
 
-func (m *MockBackend) MakeImageCache(cacheFrom []string) builder.ImageCache {
+func (m *MockBackend) MakeImageCache(ctx context.Context, cacheFrom []string) (builder.ImageCache, error) {
 	if m.makeImageCacheFunc != nil {
-		return m.makeImageCacheFunc(cacheFrom)
+		return m.makeImageCacheFunc(cacheFrom), nil
 	}
-	return nil
+	return nil, nil
 }
 
 func (m *MockBackend) CreateImage(config []byte, parent string) (builder.Image, error) {
@@ -143,6 +142,6 @@ func (l *mockRWLayer) Commit() (builder.ROLayer, error) {
 	return nil, nil
 }
 
-func (l *mockRWLayer) Root() containerfs.ContainerFS {
-	return nil
+func (l *mockRWLayer) Root() string {
+	return ""
 }

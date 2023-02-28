@@ -13,9 +13,7 @@ import (
 )
 
 func TestHostsEntries(t *testing.T) {
-	if !testutils.IsRunningInContainer() {
-		defer testutils.SetupTestOSContext(t)()
-	}
+	defer testutils.SetupTestOSContext(t)()
 
 	expectedHostsFile := `127.0.0.1	localhost
 ::1	localhost ip6-localhost ip6-loopback
@@ -32,8 +30,7 @@ fe90::2	somehost.example.com somehost
 		[]*IpamConf{{PreferredPool: "fe90::/64", Gateway: "fe90::1"}},
 		nil)}
 
-	c, nws := getTestEnv(t, opts)
-	ctrlr := c.(*controller)
+	ctrlr, nws := getTestEnv(t, opts)
 
 	hostsFile, err := os.CreateTemp("", "")
 	if err != nil {

@@ -297,8 +297,6 @@ type Info struct {
 	Labels             []string
 	ExperimentalBuild  bool
 	ServerVersion      string
-	ClusterStore       string `json:",omitempty"` // Deprecated: host-discovery and overlay networks with external k/v stores are deprecated
-	ClusterAdvertise   string `json:",omitempty"` // Deprecated: host-discovery and overlay networks with external k/v stores are deprecated
 	Runtimes           map[string]Runtime
 	DefaultRuntime     string
 	Swarm              swarm.Info
@@ -350,20 +348,19 @@ func DecodeSecurityOptions(opts []string) ([]SecurityOpt, error) {
 			continue
 		}
 		secopt := SecurityOpt{}
-		split := strings.Split(opt, ",")
-		for _, s := range split {
-			kv := strings.SplitN(s, "=", 2)
-			if len(kv) != 2 {
+		for _, s := range strings.Split(opt, ",") {
+			k, v, ok := strings.Cut(s, "=")
+			if !ok {
 				return nil, fmt.Errorf("invalid security option %q", s)
 			}
-			if kv[0] == "" || kv[1] == "" {
+			if k == "" || v == "" {
 				return nil, errors.New("invalid empty security option")
 			}
-			if kv[0] == "name" {
-				secopt.Name = kv[1]
+			if k == "name" {
+				secopt.Name = v
 				continue
 			}
-			secopt.Options = append(secopt.Options, KeyValue{Key: kv[0], Value: kv[1]})
+			secopt.Options = append(secopt.Options, KeyValue{Key: k, Value: v})
 		}
 		so = append(so, secopt)
 	}
@@ -774,18 +771,31 @@ type BuildResult struct {
 	ID string
 }
 
-// BuildCache contains information about a build cache record
+// BuildCache contains information about a build cache record.
 type BuildCache struct {
-	ID          string
-	Parent      string
-	Type        string
+	// ID is the unique ID of the build cache record.
+	ID string
+	// Parent is the ID of the parent build cache record.
+	//
+	// Deprecated: deprecated in API v1.42 and up, as it was deprecated in BuildKit; use Parents instead.
+	Parent string `json:"Parent,omitempty"`
+	// Parents is the list of parent build cache record IDs.
+	Parents []string `json:" Parents,omitempty"`
+	// Type is the cache record type.
+	Type string
+	// Description is a description of the build-step that produced the build cache.
 	Description string
-	InUse       bool
-	Shared      bool
-	Size        int64
-	CreatedAt   time.Time
-	LastUsedAt  *time.Time
-	UsageCount  int
+	// InUse indicates if the build cache is in use.
+	InUse bool
+	// Shared indicates if the build cache is shared.
+	Shared bool
+	// Size is the amount of disk space used by the build cache (in bytes).
+	Size int64
+	// CreatedAt is the date and time at which the build cache was created.
+	CreatedAt time.Time
+	// LastUsedAt is the date and time at which the build cache was last used.
+	LastUsedAt *time.Time
+	UsageCount int
 }
 
 // BuildCachePruneOptions hold parameters to prune the build cache

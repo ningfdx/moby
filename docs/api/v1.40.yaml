@@ -24,7 +24,7 @@ info:
   title: "Docker Engine API"
   version: "1.40"
   x-logo:
-    url: "https://docs.docker.com/images/logo-docker-main.png"
+    url: "https://docs.docker.com/assets/images/logo-docker-main.png"
   description: |
     The Engine API is an HTTP API served by Docker Engine. It is the API the
     Docker client uses to communicate with the Engine, so everything the Docker
@@ -746,11 +746,13 @@ definitions:
           The time to wait between checks in nanoseconds. It should be 0 or at
           least 1000000 (1 ms). 0 means inherit.
         type: "integer"
+        format: "int64"
       Timeout:
         description: |
           The time to wait before considering the check to have hung. It should
           be 0 or at least 1000000 (1 ms). 0 means inherit.
         type: "integer"
+        format: "int64"
       Retries:
         description: |
           The number of consecutive failures needed to consider a container as
@@ -762,11 +764,13 @@ definitions:
           health-retries countdown in nanoseconds. It should be 0 or at least
           1000000 (1 ms). 0 means inherit.
         type: "integer"
+        format: "int64"
 
   Health:
     description: |
       Health stores information about the container's healthcheck results.
     type: "object"
+    x-nullable: true
     properties:
       Status:
         description: |
@@ -792,13 +796,13 @@ definitions:
         description: |
           Log contains the last few results (oldest first)
         items:
-          x-nullable: true
           $ref: "#/definitions/HealthcheckResult"
 
   HealthcheckResult:
     description: |
       HealthcheckResult stores information about a single run of a healthcheck probe
     type: "object"
+    x-nullable: true
     properties:
       Start:
         description: |
@@ -1075,6 +1079,7 @@ definitions:
               remapping option is enabled.
           ShmSize:
             type: "integer"
+            format: "int64"
             description: |
               Size of `/dev/shm` in bytes. If omitted, the system uses 64MB.
             minimum: 0
@@ -1595,7 +1600,7 @@ definitions:
           List of image names/tags in the local image cache that reference this
           image.
 
-          Multiple image tags can refer to the same imagem and this list may be
+          Multiple image tags can refer to the same image, and this list may be
           empty if no tags reference the image, in which case the image is
           "untagged", in which case it can still be referenced by its ID.
         type: "array"
@@ -1796,7 +1801,7 @@ definitions:
           List of image names/tags in the local image cache that reference this
           image.
 
-          Multiple image tags can refer to the same imagem and this list may be
+          Multiple image tags can refer to the same image, and this list may be
           empty if no tags reference the image, in which case the image is
           "untagged", in which case it can still be referenced by its ID.
         type: "array"
@@ -1846,6 +1851,7 @@ definitions:
           This size is not calculated by default. `-1` indicates that the value
           has not been set / calculated.
         type: "integer"
+        format: "int64"
         x-nullable: false
         example: 1239828
       VirtualSize:
@@ -1990,6 +1996,7 @@ definitions:
         properties:
           Size:
             type: "integer"
+            format: "int64"
             default: -1
             description: |
               Amount of disk space used by the volume (in bytes). This information
@@ -1999,6 +2006,7 @@ definitions:
             x-nullable: false
           RefCount:
             type: "integer"
+            format: "int64"
             default: -1
             description: |
               The number of containers referencing this volume. This field
@@ -2193,23 +2201,52 @@ definitions:
 
   BuildCache:
     type: "object"
+    description: |
+      BuildCache contains information about a build cache record.
     properties:
       ID:
         type: "string"
+        description: |
+          Unique ID of the build cache record.
+        example: "ndlpt0hhvkqcdfkputsk4cq9c"
       Parent:
+        description: |
+          ID of the parent build cache record.
         type: "string"
+        example: "hw53o5aio51xtltp5xjp8v7fx"
       Type:
         type: "string"
+        description: |
+          Cache record type.
+        example: "regular"
+        # see https://github.com/moby/buildkit/blob/fce4a32258dc9d9664f71a4831d5de10f0670677/client/diskusage.go#L75-L84
+        enum:
+          - "internal"
+          - "frontend"
+          - "source.local"
+          - "source.git.checkout"
+          - "exec.cachemount"
+          - "regular"
       Description:
         type: "string"
+        description: |
+          Description of the build-step that produced the build cache.
+        example: "mount / from exec /bin/sh -c echo 'Binary::apt::APT::Keep-Downloaded-Packages \"true\";' > /etc/apt/apt.conf.d/keep-cache"
       InUse:
         type: "boolean"
+        description: |
+          Indicates if the build cache is in use.
+        example: false
       Shared:
         type: "boolean"
+        description: |
+          Indicates if the build cache is shared.
+        example: true
       Size:
         description: |
           Amount of disk space used by the build cache (in bytes).
         type: "integer"
+        example: 51
       CreatedAt:
         description: |
           Date and time at which the build cache was created in
@@ -2227,6 +2264,7 @@ definitions:
         example: "2017-08-09T07:09:37.632105588Z"
       UsageCount:
         type: "integer"
+        example: 26
 
   ImageID:
     type: "object"
@@ -2244,6 +2282,8 @@ definitions:
         type: "string"
       error:
         type: "string"
+      errorDetail:
+        $ref: "#/definitions/ErrorDetail"
       status:
         type: "string"
       progress:
@@ -4396,6 +4436,7 @@ definitions:
       ContainerState stores container's running state. It's part of ContainerJSONBase
       and will be returned by the "inspect" command.
     type: "object"
+    x-nullable: true
     properties:
       Status:
         description: |
@@ -4453,7 +4494,6 @@ definitions:
         type: "string"
         example: "2020-01-06T09:07:59.461876391Z"
       Health:
-        x-nullable: true
         $ref: "#/definitions/Health"
 
   ContainerWaitResponse:
@@ -4466,6 +4506,7 @@ definitions:
       StatusCode:
         description: "Exit code of the container"
         type: "integer"
+        format: "int64"
         x-nullable: false
       Error:
         $ref: "#/definitions/ContainerWaitExitError"
@@ -5993,7 +6034,6 @@ paths:
                 items:
                   type: "string"
               State:
-                x-nullable: true
                 $ref: "#/definitions/ContainerState"
               Image:
                 description: "The container's image ID"
@@ -6006,9 +6046,6 @@ paths:
                 type: "string"
               LogPath:
                 type: "string"
-              Node:
-                description: "TODO"
-                type: "object"
               Name:
                 type: "string"
               RestartCount:
@@ -6795,7 +6832,8 @@ paths:
           type: "string"
         - name: "signal"
           in: "query"
-          description: "Signal to send to the container as an integer or string (e.g. `SIGINT`)"
+          description: |
+            Signal to send to the container as an integer or string (e.g. `SIGINT`).
           type: "string"
           default: "SIGKILL"
       tags: ["Container"]
@@ -8190,6 +8228,10 @@ paths:
               IdentityToken: "9cbaf023786cd7..."
         204:
           description: "No error"
+        401:
+          description: "Auth error"
+          schema:
+            $ref: "#/definitions/ErrorResponse"
         500:
           description: "Server error"
           schema:
@@ -8526,6 +8568,29 @@ paths:
                   UsageData:
                     Size: 10920104
                     RefCount: 2
+              BuildCache:
+                -
+                  ID: "hw53o5aio51xtltp5xjp8v7fx"
+                  Parent: ""
+                  Type: "regular"
+                  Description: "pulled from docker.io/library/debian@sha256:234cb88d3020898631af0ccbbcca9a66ae7306ecd30c9720690858c1b007d2a0"
+                  InUse: false
+                  Shared: true
+                  Size: 0
+                  CreatedAt: "2021-06-28T13:31:01.474619385Z"
+                  LastUsedAt: "2021-07-07T22:02:32.738075951Z"
+                  UsageCount: 26
+                -
+                  ID: "ndlpt0hhvkqcdfkputsk4cq9c"
+                  Parent: "ndlpt0hhvkqcdfkputsk4cq9c"
+                  Type: "regular"
+                  Description: "mount / from exec /bin/sh -c echo 'Binary::apt::APT::Keep-Downloaded-Packages \"true\";' > /etc/apt/apt.conf.d/keep-cache"
+                  InUse: false
+                  Shared: true
+                  Size: 51
+                  CreatedAt: "2021-06-28T13:31:03.002625487Z"
+                  LastUsedAt: "2021-07-07T22:02:32.773909517Z"
+                  UsageCount: 26
         500:
           description: "server error"
           schema:
@@ -9012,6 +9077,7 @@ paths:
           type: "boolean"
           default: false
       tags: ["Volume"]
+
   /volumes/prune:
     post:
       summary: "Delete unused volumes"
@@ -10030,7 +10096,7 @@ paths:
           required: true
           schema:
             type: "object"
-            title: "SwarmJoinRequest"
+            title: "SwarmInitRequest"
             properties:
               ListenAddr:
                 description: |
@@ -10129,7 +10195,7 @@ paths:
           required: true
           schema:
             type: "object"
-            title: "SwarmInitRequest"
+            title: "SwarmJoinRequest"
             properties:
               ListenAddr:
                 description: |

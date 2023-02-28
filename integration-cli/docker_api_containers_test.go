@@ -26,7 +26,6 @@ import (
 	"github.com/docker/docker/errdefs"
 	"github.com/docker/docker/integration-cli/cli"
 	"github.com/docker/docker/integration-cli/cli/build"
-	"github.com/docker/docker/pkg/ioutils"
 	"github.com/docker/docker/pkg/stringid"
 	"github.com/docker/docker/testutil/request"
 	"github.com/docker/docker/volume"
@@ -545,7 +544,6 @@ func (s *DockerAPISuite) TestContainerAPICreate(c *testing.T) {
 }
 
 func (s *DockerAPISuite) TestContainerAPICreateEmptyConfig(c *testing.T) {
-
 	cli, err := client.NewClientWithOpts(client.FromEnv)
 	assert.NilError(c, err)
 	defer cli.Close()
@@ -1070,7 +1068,6 @@ func (s *DockerAPISuite) TestContainerAPICopyResourcePathEmptyPre124(c *testing.
 	b, err := request.ReadBody(body)
 	assert.NilError(c, err)
 	assert.Assert(c, is.Regexp("^Path cannot be empty\n$", string(b)))
-
 }
 
 func (s *DockerAPISuite) TestContainerAPICopyResourcePathNotFoundPre124(c *testing.T) {
@@ -1092,7 +1089,6 @@ func (s *DockerAPISuite) TestContainerAPICopyResourcePathNotFoundPre124(c *testi
 	b, err := request.ReadBody(body)
 	assert.NilError(c, err)
 	assert.Assert(c, is.Regexp("^Could not find the file /notexist in container "+name+"\n$", string(b)))
-
 }
 
 func (s *DockerAPISuite) TestContainerAPICopyContainerNotFoundPr124(c *testing.T) {
@@ -1230,7 +1226,6 @@ func (s *DockerAPISuite) TestContainerAPIDeleteRemoveVolume(c *testing.T) {
 
 // Regression test for https://github.com/docker/docker/issues/6231
 func (s *DockerAPISuite) TestContainerAPIChunkedEncoding(c *testing.T) {
-
 	config := map[string]interface{}{
 		"Image":     "busybox",
 		"Cmd":       append([]string{"/bin/sh", "-c"}, sleepCommandForDaemonPlatform()...),
@@ -1742,7 +1737,7 @@ func (s *DockerAPISuite) TestContainersAPICreateMountsValidation(c *testing.T) {
 	}
 
 	if testEnv.IsLocalDaemon() {
-		tmpDir, err := ioutils.TempDir("", "test-mounts-api")
+		tmpDir, err := os.MkdirTemp("", "test-mounts-api")
 		assert.NilError(c, err)
 		defer os.RemoveAll(tmpDir)
 		cases = append(cases, []testCase{
@@ -1920,7 +1915,6 @@ func (s *DockerAPISuite) TestContainersAPICreateMountsValidation(c *testing.T) {
 				msg: "Source must not be specified",
 			},
 		}...)
-
 	}
 	apiClient, err := client.NewClientWithOpts(client.FromEnv)
 	assert.NilError(c, err)
@@ -2056,7 +2050,7 @@ func (s *DockerAPISuite) TestContainersAPICreateMountsCreate(c *testing.T) {
 
 		// for modes only supported on Linux
 		if DaemonIsLinux() {
-			tmpDir3, err := ioutils.TempDir("", "test-mounts-api-3")
+			tmpDir3, err := os.MkdirTemp("", "test-mounts-api-3")
 			assert.NilError(c, err)
 			defer os.RemoveAll(tmpDir3)
 
@@ -2148,7 +2142,6 @@ func (s *DockerAPISuite) TestContainersAPICreateMountsCreate(c *testing.T) {
 			assert.NilError(c, err)
 
 			switch {
-
 			// Named volumes still exist after the container is removed
 			case x.spec.Type == "volume" && len(x.spec.Source) > 0:
 				_, err := apiclient.VolumeInspect(ctx, mountPoint.Name)

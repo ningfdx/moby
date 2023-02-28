@@ -6,7 +6,6 @@ import (
 
 	containertypes "github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/container"
-	"github.com/sirupsen/logrus"
 )
 
 // ContainerRestart stops and starts a container. It attempts to
@@ -25,7 +24,6 @@ func (daemon *Daemon) ContainerRestart(ctx context.Context, name string, options
 		return fmt.Errorf("Cannot restart container %s: %v", name, err)
 	}
 	return nil
-
 }
 
 // containerRestart attempts to gracefully stop and then start the
@@ -52,26 +50,18 @@ func (daemon *Daemon) containerRestart(ctx context.Context, container *container
 	}
 
 	if container.IsRunning() {
-		// set AutoRemove flag to false before stop so the container won't be
-		// removed during restart process
-		autoRemove := container.HostConfig.AutoRemove
+		container.Lock()
+		container.HasBeenManuallyRestarted = true
+		container.Unlock()
 
-		container.HostConfig.AutoRemove = false
 		err := daemon.containerStop(ctx, container, options)
-		// restore AutoRemove irrespective of whether the stop worked or not
-		container.HostConfig.AutoRemove = autoRemove
-		// containerStop will write HostConfig to disk, we shall restore AutoRemove
-		// in disk too
-		if toDiskErr := daemon.checkpointAndSave(container); toDiskErr != nil {
-			logrus.Errorf("Write container to disk error: %v", toDiskErr)
-		}
 
 		if err != nil {
 			return err
 		}
 	}
 
-	if err := daemon.containerStart(container, "", "", true); err != nil {
+	if err := daemon.containerStart(ctx, container, "", "", true); err != nil {
 		return err
 	}
 

@@ -1,6 +1,7 @@
 package dockerfile // import "github.com/docker/docker/builder/dockerfile"
 
 import (
+	"context"
 	"os"
 	"runtime"
 	"testing"
@@ -86,7 +87,7 @@ func TestDispatch(t *testing.T) {
 		{
 			name: "COPY url",
 			cmd: &instructions.CopyCommand{SourcesAndDest: instructions.SourcesAndDest{
-				SourcePaths: []string{"https://index.docker.io/robots.txt"},
+				SourcePaths: []string{"https://example.com/index.html"},
 				DestPath:    "/",
 			}},
 			expectedError: "source can't be a URL for COPY",
@@ -115,21 +116,21 @@ func TestDispatch(t *testing.T) {
 				}
 			}()
 
-			context, err := remotecontext.FromArchive(tarStream)
+			buildContext, err := remotecontext.FromArchive(tarStream)
 
 			if err != nil {
 				t.Fatalf("Error when creating tar context: %s", err)
 			}
 
 			defer func() {
-				if err = context.Close(); err != nil {
+				if err = buildContext.Close(); err != nil {
 					t.Fatalf("Error when closing tar context: %s", err)
 				}
 			}()
 
-			b := newBuilderWithMockBackend()
-			sb := newDispatchRequest(b, '`', context, NewBuildArgs(make(map[string]*string)), newStagesBuildResults())
-			err = dispatch(sb, tc.cmd)
+			b := newBuilderWithMockBackend(t)
+			sb := newDispatchRequest(b, '`', buildContext, NewBuildArgs(make(map[string]*string)), newStagesBuildResults())
+			err = dispatch(context.TODO(), sb, tc.cmd)
 			assert.Check(t, is.ErrorContains(err, tc.expectedError))
 		})
 	}

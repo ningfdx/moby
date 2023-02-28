@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/containerd/cgroups"
@@ -34,11 +35,9 @@ import (
 	nwconfig "github.com/docker/docker/libnetwork/config"
 	"github.com/docker/docker/libnetwork/drivers/bridge"
 	"github.com/docker/docker/libnetwork/netlabel"
-	"github.com/docker/docker/libnetwork/netutils"
 	"github.com/docker/docker/libnetwork/options"
 	lntypes "github.com/docker/docker/libnetwork/types"
 	"github.com/docker/docker/opts"
-	"github.com/docker/docker/pkg/containerfs"
 	"github.com/docker/docker/pkg/idtools"
 	"github.com/docker/docker/pkg/parsers"
 	"github.com/docker/docker/pkg/parsers/kernel"
@@ -61,7 +60,6 @@ const (
 	// See https://git.kernel.org/cgit/linux/kernel/git/tip/tip.git/tree/kernel/sched/sched.h?id=8cd9234c64c584432f6992fe944ca9e46ca8ea76#n269
 	linuxMinCPUShares = 2
 	linuxMaxCPUShares = 262144
-	platformSupported = true
 	// It's not kernel limit, we want this 6M limit to account for overhead during startup, and to supply a reasonable functional container
 	linuxMinMemory = 6291456
 	// constants for remapped root settings
@@ -216,26 +214,27 @@ func parseSecurityOpt(container *container.Container, config *containertypes.Hos
 			continue
 		}
 
-		var con []string
+		var k, v string
+		var ok bool
 		if strings.Contains(opt, "=") {
-			con = strings.SplitN(opt, "=", 2)
+			k, v, ok = strings.Cut(opt, "=")
 		} else if strings.Contains(opt, ":") {
-			con = strings.SplitN(opt, ":", 2)
+			k, v, ok = strings.Cut(opt, ":")
 			logrus.Warn("Security options with `:` as a separator are deprecated and will be completely unsupported in 17.04, use `=` instead.")
 		}
-		if len(con) != 2 {
+		if !ok {
 			return fmt.Errorf("invalid --security-opt 1: %q", opt)
 		}
 
-		switch con[0] {
+		switch k {
 		case "label":
-			labelOpts = append(labelOpts, con[1])
+			labelOpts = append(labelOpts, v)
 		case "apparmor":
-			container.AppArmorProfile = con[1]
+			container.AppArmorProfile = v
 		case "seccomp":
-			container.SeccompProfile = con[1]
+			container.SeccompProfile = v
 		case "no-new-privileges":
-			noNewPrivileges, err := strconv.ParseBool(con[1])
+			noNewPrivileges, err := strconv.ParseBool(v)
 			if err != nil {
 				return fmt.Errorf("invalid --security-opt 2: %q", opt)
 			}
@@ -558,7 +557,6 @@ func verifyPlatformContainerResources(resources *containertypes.Resources, sysIn
 	if len(resources.BlkioDeviceWriteBps) > 0 && !sysInfo.BlkioWriteBpsDevice {
 		warnings = append(warnings, "Your kernel does not support BPS Block I/O write limit or the cgroup is not mounted. Block I/O BPS write limit discarded.")
 		resources.BlkioDeviceWriteBps = []*pblkiodev.ThrottleDevice{}
-
 	}
 	if len(resources.BlkioDeviceReadIOps) > 0 && !sysInfo.BlkioReadIOpsDevice {
 		warnings = append(warnings, "Your kernel does not support IOPS Block read limit or the cgroup is not mounted. Block I/O IOPS read limit discarded.")
@@ -707,8 +705,8 @@ func verifyPlatformContainerSettings(daemon *Daemon, hostConfig *containertypes.
 		hostConfig.Runtime = daemon.configStore.GetDefaultRuntimeName()
 	}
 
-	if rt := daemon.configStore.GetRuntime(hostConfig.Runtime); rt == nil {
-		return warnings, fmt.Errorf("Unknown runtime specified %s", hostConfig.Runtime)
+	if _, err := daemon.getRuntime(hostConfig.Runtime); err != nil {
+		return warnings, err
 	}
 
 	parser := volumemounts.NewParser()
@@ -764,7 +762,9 @@ func verifyDaemonSettings(conf *config.Config) error {
 	configureRuntimes(conf)
 	if rtName := conf.GetDefaultRuntimeName(); rtName != "" {
 		if conf.GetRuntime(rtName) == nil {
-			return fmt.Errorf("specified default runtime '%s' does not exist", rtName)
+			if !config.IsPermissibleC8dRuntimeName(rtName) {
+				return fmt.Errorf("specified default runtime '%s' does not exist", rtName)
+			}
 		}
 	}
 	return nil
@@ -820,7 +820,7 @@ func configureKernelSecuritySupport(config *config.Config, driverName string) er
 			return nil
 		}
 
-		if driverName == "overlay" || driverName == "overlay2" {
+		if driverName == "overlay" || driverName == "overlay2" || driverName == "overlayfs" {
 			// If driver is overlay or overlay2, make sure kernel
 			// supports selinux with overlay.
 			supported, err := overlaySupportsSelinux()
@@ -863,7 +863,7 @@ func (daemon *Daemon) initNetworkController(activeSandboxes map[string]interface
 	return nil
 }
 
-func configureNetworking(controller libnetwork.NetworkController, conf *config.Config) error {
+func configureNetworking(controller *libnetwork.Controller, conf *config.Config) error {
 	// Initialize default network on "null"
 	if n, _ := controller.NetworkByName("none"); n == nil {
 		if _, err := controller.NewNetwork("null", "none", "", libnetwork.NetworkOptionPersist(true)); err != nil {
@@ -901,7 +901,7 @@ func configureNetworking(controller libnetwork.NetworkController, conf *config.C
 }
 
 // setHostGatewayIP sets cfg.HostGatewayIP to the default bridge's IP if it is empty.
-func setHostGatewayIP(controller libnetwork.NetworkController, config *config.Config) {
+func setHostGatewayIP(controller *libnetwork.Controller, config *config.Config) {
 	if config.HostGatewayIP != nil {
 		return
 	}
@@ -929,7 +929,7 @@ func driverOptions(config *config.Config) nwconfig.Option {
 	})
 }
 
-func initBridgeDriver(controller libnetwork.NetworkController, config *config.Config) error {
+func initBridgeDriver(controller *libnetwork.Controller, config *config.Config) error {
 	bridgeName := bridge.DefaultBridgeName
 	if config.BridgeConfig.Iface != "" {
 		bridgeName = config.BridgeConfig.Iface
@@ -949,30 +949,37 @@ func initBridgeDriver(controller libnetwork.NetworkController, config *config.Co
 
 	ipamV4Conf := &libnetwork.IpamConf{AuxAddresses: make(map[string]string)}
 
-	nwList, nw6List, err := netutils.ElectInterfaceAddresses(bridgeName)
+	// By default, libnetwork will request an arbitrary available address
+	// pool for the network from the configured IPAM allocator.
+	// Configure it to use the IPv4 network ranges of the existing bridge
+	// interface if one exists with IPv4 addresses assigned to it.
+
+	nwList, nw6List, err := ifaceAddrs(bridgeName)
 	if err != nil {
 		return errors.Wrap(err, "list bridge addresses failed")
 	}
 
-	nw := nwList[0]
-	if len(nwList) > 1 && config.BridgeConfig.FixedCIDR != "" {
-		_, fCIDR, err := net.ParseCIDR(config.BridgeConfig.FixedCIDR)
-		if err != nil {
-			return errors.Wrap(err, "parse CIDR failed")
-		}
-		// Iterate through in case there are multiple addresses for the bridge
-		for _, entry := range nwList {
-			if fCIDR.Contains(entry.IP) {
-				nw = entry
-				break
+	if len(nwList) > 0 {
+		nw := nwList[0]
+		if len(nwList) > 1 && config.BridgeConfig.FixedCIDR != "" {
+			_, fCIDR, err := net.ParseCIDR(config.BridgeConfig.FixedCIDR)
+			if err != nil {
+				return errors.Wrap(err, "parse CIDR failed")
+			}
+			// Iterate through in case there are multiple addresses for the bridge
+			for _, entry := range nwList {
+				if fCIDR.Contains(entry.IP) {
+					nw = entry
+					break
+				}
 			}
 		}
-	}
 
-	ipamV4Conf.PreferredPool = lntypes.GetIPNetCanonical(nw).String()
-	hip, _ := lntypes.GetHostPartIP(nw.IP, nw.Mask)
-	if hip.IsGlobalUnicast() {
-		ipamV4Conf.Gateway = nw.IP.String()
+		ipamV4Conf.PreferredPool = lntypes.GetIPNetCanonical(nw).String()
+		hip, _ := lntypes.GetHostPartIP(nw.IP, nw.Mask)
+		if hip.IsGlobalUnicast() {
+			ipamV4Conf.Gateway = nw.IP.String()
+		}
 	}
 
 	if config.BridgeConfig.IP != "" {
@@ -1070,24 +1077,24 @@ func removeDefaultBridgeInterface() {
 	}
 }
 
-func setupInitLayer(idMapping idtools.IdentityMapping) func(containerfs.ContainerFS) error {
-	return func(initPath containerfs.ContainerFS) error {
+func setupInitLayer(idMapping idtools.IdentityMapping) func(string) error {
+	return func(initPath string) error {
 		return initlayer.Setup(initPath, idMapping.RootPair())
 	}
 }
 
 // Parse the remapped root (user namespace) option, which can be one of:
-//   username            - valid username from /etc/passwd
-//   username:groupname  - valid username; valid groupname from /etc/group
-//   uid                 - 32-bit unsigned int valid Linux UID value
-//   uid:gid             - uid value; 32-bit unsigned int Linux GID value
 //
-//  If no groupname is specified, and a username is specified, an attempt
-//  will be made to lookup a gid for that username as a groupname
+// - username            - valid username from /etc/passwd
+// - username:groupname  - valid username; valid groupname from /etc/group
+// - uid                 - 32-bit unsigned int valid Linux UID value
+// - uid:gid             - uid value; 32-bit unsigned int Linux GID value
 //
-//  If names are used, they are verified to exist in passwd/group
+// If no groupname is specified, and a username is specified, an attempt
+// will be made to lookup a gid for that username as a groupname
+//
+// If names are used, they are verified to exist in passwd/group
 func parseRemappedRoot(usergrp string) (string, string, error) {
-
 	var (
 		userID, groupID     int
 		username, groupname string
@@ -1247,7 +1254,7 @@ func setupDaemonRoot(config *config.Config, rootDir string, remappedRoot idtools
 			if dirPath == "/" {
 				break
 			}
-			if !idtools.CanAccess(dirPath, remappedRoot) {
+			if !canAccess(dirPath, remappedRoot) {
 				return fmt.Errorf("a subdirectory in your graphroot path (%s) restricts access to the remapped root uid/gid; please fix by allowing 'o+x' permissions on existing directories", config.Root)
 			}
 		}
@@ -1257,6 +1264,34 @@ func setupDaemonRoot(config *config.Config, rootDir string, remappedRoot idtools
 		logrus.WithError(err).WithField("dir", config.Root).Warn("Error while setting daemon root propagation, this is not generally critical but may cause some functionality to not work or fallback to less desirable behavior")
 	}
 	return nil
+}
+
+// canAccess takes a valid (existing) directory and a uid, gid pair and determines
+// if that uid, gid pair has access (execute bit) to the directory.
+//
+// Note: this is a very rudimentary check, and may not produce accurate results,
+// so should not be used for anything other than the current use, see:
+// https://github.com/moby/moby/issues/43724
+func canAccess(path string, pair idtools.Identity) bool {
+	statInfo, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	perms := statInfo.Mode().Perm()
+	if perms&0o001 == 0o001 {
+		// world access
+		return true
+	}
+	ssi := statInfo.Sys().(*syscall.Stat_t)
+	if ssi.Uid == uint32(pair.UID) && (perms&0o100 == 0o100) {
+		// owner access.
+		return true
+	}
+	if ssi.Gid == uint32(pair.GID) && (perms&0o010 == 0o010) {
+		// group access.
+		return true
+	}
+	return false
 }
 
 func setupDaemonRootPropagation(cfg *config.Config) error {
@@ -1308,7 +1343,8 @@ func getUnmountOnShutdownPath(config *config.Config) string {
 	return filepath.Join(config.ExecRoot, "unmount-on-shutdown")
 }
 
-// registerLinks writes the links to a file.
+// registerLinks registers network links between container and other containers
+// with the daemon using the specification in hostConfig.
 func (daemon *Daemon) registerLinks(container *container.Container, hostConfig *containertypes.HostConfig) error {
 	if hostConfig == nil || hostConfig.NetworkMode.IsUserDefined() {
 		return nil
@@ -1331,8 +1367,8 @@ func (daemon *Daemon) registerLinks(container *container.Container, hostConfig *
 			return errors.Wrapf(err, "could not get container for %s", name)
 		}
 		for child.HostConfig.NetworkMode.IsContainer() {
-			parts := strings.SplitN(string(child.HostConfig.NetworkMode), ":", 2)
-			child, err = daemon.GetContainer(parts[1])
+			cid := child.HostConfig.NetworkMode.ConnectedContainer()
+			child, err = daemon.GetContainer(cid)
 			if err != nil {
 				if errdefs.IsNotFound(err) {
 					// Trying to link to a non-existing container is not valid, and
@@ -1341,7 +1377,7 @@ func (daemon *Daemon) registerLinks(container *container.Container, hostConfig *
 					// image could not be found (see moby/moby#39823)
 					err = errdefs.InvalidParameter(err)
 				}
-				return errors.Wrapf(err, "Could not get container for %s", parts[1])
+				return errors.Wrapf(err, "could not get container for %s", cid)
 			}
 		}
 		if child.HostConfig.NetworkMode.IsHost() {
@@ -1352,22 +1388,25 @@ func (daemon *Daemon) registerLinks(container *container.Container, hostConfig *
 		}
 	}
 
-	// After we load all the links into the daemon
-	// set them to nil on the hostconfig
-	_, err := container.WriteHostConfig()
-	return err
+	return nil
 }
 
 // conditionalMountOnStart is a platform specific helper function during the
 // container start to call mount.
 func (daemon *Daemon) conditionalMountOnStart(container *container.Container) error {
-	return daemon.Mount(container)
+	if !daemon.UsesSnapshotter() {
+		return daemon.Mount(container)
+	}
+	return nil
 }
 
 // conditionalUnmountOnCleanup is a platform specific helper function called
 // during the cleanup of a container to unmount.
 func (daemon *Daemon) conditionalUnmountOnCleanup(container *container.Container) error {
-	return daemon.Unmount(container)
+	if !daemon.UsesSnapshotter() {
+		return daemon.Unmount(container)
+	}
+	return nil
 }
 
 func copyBlkioEntry(entries []*statsV1.BlkIOEntry) []types.BlkioStatEntry {
@@ -1384,10 +1423,13 @@ func copyBlkioEntry(entries []*statsV1.BlkIOEntry) []types.BlkioStatEntry {
 }
 
 func (daemon *Daemon) stats(c *container.Container) (*types.StatsJSON, error) {
-	if !c.IsRunning() {
-		return nil, errNotRunning(c.ID)
+	c.Lock()
+	task, err := c.GetRunningTask()
+	c.Unlock()
+	if err != nil {
+		return nil, err
 	}
-	cs, err := daemon.containerd.Stats(context.Background(), c.ID)
+	cs, err := task.Stats(context.Background())
 	if err != nil {
 		if strings.Contains(err.Error(), "container not found") {
 			return nil, containerNotFound(c.ID)

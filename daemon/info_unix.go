@@ -12,8 +12,8 @@ import (
 
 	"github.com/docker/docker/api/types"
 	containertypes "github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/pkg/rootless"
 	"github.com/docker/docker/pkg/sysinfo"
-	"github.com/docker/docker/rootless"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 )
@@ -45,15 +45,16 @@ func (daemon *Daemon) fillPlatformInfo(v *types.Info, sysInfo *sysinfo.SysInfo) 
 	v.ContainerdCommit.ID = "N/A"
 	v.InitCommit.ID = "N/A"
 
-	defaultRuntimeBinary := daemon.configStore.GetRuntime(v.DefaultRuntime).Path
-	if rv, err := exec.Command(defaultRuntimeBinary, "--version").Output(); err == nil {
-		if _, _, commit, err := parseRuntimeVersion(string(rv)); err != nil {
-			logrus.Warnf("failed to parse %s version: %v", defaultRuntimeBinary, err)
+	if rt := daemon.configStore.GetRuntime(v.DefaultRuntime); rt != nil {
+		if rv, err := exec.Command(rt.Path, "--version").Output(); err == nil {
+			if _, _, commit, err := parseRuntimeVersion(string(rv)); err != nil {
+				logrus.Warnf("failed to parse %s version: %v", rt.Path, err)
+			} else {
+				v.RuncCommit.ID = commit
+			}
 		} else {
-			v.RuncCommit.ID = commit
+			logrus.Warnf("failed to retrieve %s version: %v", rt.Path, err)
 		}
-	} else {
-		logrus.Warnf("failed to retrieve %s version: %v", defaultRuntimeBinary, err)
 	}
 
 	if rv, err := daemon.containerd.Version(context.Background()); err == nil {
@@ -176,21 +177,22 @@ func (daemon *Daemon) fillPlatformVersion(v *types.Version) {
 	}
 
 	defaultRuntime := daemon.configStore.GetDefaultRuntimeName()
-	defaultRuntimeBinary := daemon.configStore.GetRuntime(defaultRuntime).Path
-	if rv, err := exec.Command(defaultRuntimeBinary, "--version").Output(); err == nil {
-		if _, ver, commit, err := parseRuntimeVersion(string(rv)); err != nil {
-			logrus.Warnf("failed to parse %s version: %v", defaultRuntimeBinary, err)
+	if rt := daemon.configStore.GetRuntime(defaultRuntime); rt != nil {
+		if rv, err := exec.Command(rt.Path, "--version").Output(); err == nil {
+			if _, ver, commit, err := parseRuntimeVersion(string(rv)); err != nil {
+				logrus.Warnf("failed to parse %s version: %v", rt.Path, err)
+			} else {
+				v.Components = append(v.Components, types.ComponentVersion{
+					Name:    defaultRuntime,
+					Version: ver,
+					Details: map[string]string{
+						"GitCommit": commit,
+					},
+				})
+			}
 		} else {
-			v.Components = append(v.Components, types.ComponentVersion{
-				Name:    defaultRuntime,
-				Version: ver,
-				Details: map[string]string{
-					"GitCommit": commit,
-				},
-			})
+			logrus.Warnf("failed to retrieve %s version: %v", rt.Path, err)
 		}
-	} else {
-		logrus.Warnf("failed to retrieve %s version: %v", defaultRuntimeBinary, err)
 	}
 
 	defaultInitBinary := daemon.configStore.GetInitPath()
@@ -306,7 +308,7 @@ func getBackingFs(v *types.Info) string {
 //
 // Output example from `docker-init --version`:
 //
-//     tini version 0.18.0 - git.fec3683
+//	tini version 0.18.0 - git.fec3683
 func parseInitVersion(v string) (version string, commit string, err error) {
 	parts := strings.Split(v, " - ")
 
@@ -331,9 +333,9 @@ func parseInitVersion(v string) (version string, commit string, err error) {
 //
 // Output example from `runc --version`:
 //
-//   runc version 1.0.0-rc5+dev
-//   commit: 69663f0bd4b60df09991c08812a60108003fa340
-//   spec: 1.0.0
+//	runc version 1.0.0-rc5+dev
+//	commit: 69663f0bd4b60df09991c08812a60108003fa340
+//	spec: 1.0.0
 func parseRuntimeVersion(v string) (runtime string, version string, commit string, err error) {
 	lines := strings.Split(strings.TrimSpace(v), "\n")
 	for _, line := range lines {

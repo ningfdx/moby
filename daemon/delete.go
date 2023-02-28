@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/containerd/containerd/leases"
 	"github.com/docker/docker/api/types"
 	containertypes "github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/container"
@@ -136,9 +137,27 @@ func (daemon *Daemon) cleanupContainer(container *container.Container, config ty
 			return err
 		}
 		container.RWLayer = nil
+	} else {
+		if daemon.UsesSnapshotter() {
+			ls := daemon.containerdCli.LeasesService()
+			lease := leases.Lease{
+				ID: container.ID,
+			}
+			if err := ls.Delete(context.Background(), lease, leases.SynchronousDelete); err != nil {
+				container.SetRemovalError(err)
+				return err
+			}
+		}
 	}
 
-	if err := containerfs.EnsureRemoveAll(container.Root); err != nil {
+	// Hold the container lock while deleting the container root directory
+	// so that other goroutines don't attempt to concurrently open files
+	// within it. Having any file open on Windows (without the
+	// FILE_SHARE_DELETE flag) will block it from being deleted.
+	container.Lock()
+	err := containerfs.EnsureRemoveAll(container.Root)
+	container.Unlock()
+	if err != nil {
 		err = errors.Wrapf(err, "unable to remove filesystem for %s", container.ID)
 		container.SetRemovalError(err)
 		return err
@@ -146,7 +165,6 @@ func (daemon *Daemon) cleanupContainer(container *container.Container, config ty
 
 	linkNames := daemon.linkIndex.delete(container)
 	selinux.ReleaseLabel(container.ProcessLabel)
-	daemon.idIndex.Delete(container.ID)
 	daemon.containers.Delete(container.ID)
 	daemon.containersReplica.Delete(container)
 	if err := daemon.removeMountPoints(container, config.RemoveVolume); err != nil {

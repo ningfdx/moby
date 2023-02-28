@@ -4,7 +4,7 @@ Package client is a Go client for the Docker Engine API.
 For more information about the Engine API, see the documentation:
 https://docs.docker.com/engine/api/
 
-Usage
+# Usage
 
 You use the library by creating a client object and calling methods on it. The
 client can be created either from environment variables with NewClientWithOpts(client.FromEnv),
@@ -37,7 +37,6 @@ For example, to list running containers (the equivalent of "docker ps"):
 			fmt.Printf("%s %s\n", container.ID[:10], container.Image)
 		}
 	}
-
 */
 package client // import "github.com/docker/docker/client"
 
@@ -121,12 +120,10 @@ func CheckRedirect(req *http.Request, via []*http.Request) error {
 // itself with values from environment variables (client.FromEnv), and has
 // automatic API version negotiation enabled (client.WithAPIVersionNegotiation()).
 //
-//
 //	cli, err := client.NewClientWithOpts(
 //		client.FromEnv,
 //		client.WithAPIVersionNegotiation(),
 //	)
-//
 func NewClientWithOpts(ops ...Opt) (*Client, error) {
 	client, err := defaultHTTPClient(DefaultDockerHost)
 	if err != nil {
@@ -285,13 +282,12 @@ func (cli *Client) HTTPClient() *http.Client {
 // ParseHostURL parses a url string, validates the string is a host url, and
 // returns the parsed URL
 func ParseHostURL(host string) (*url.URL, error) {
-	protoAddrParts := strings.SplitN(host, "://", 2)
-	if len(protoAddrParts) == 1 {
+	proto, addr, ok := strings.Cut(host, "://")
+	if !ok || addr == "" {
 		return nil, errors.Errorf("unable to parse docker host `%s`", host)
 	}
 
 	var basePath string
-	proto, addr := protoAddrParts[0], protoAddrParts[1]
 	if proto == "tcp" {
 		parsed, err := url.Parse("tcp://" + addr)
 		if err != nil {

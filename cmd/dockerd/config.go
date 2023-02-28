@@ -7,25 +7,8 @@ import (
 	"github.com/spf13/pflag"
 )
 
-// defaultTrustKeyFile is the default filename for the trust key
-const defaultTrustKeyFile = "key.json"
-
 // installCommonConfigFlags adds flags to the pflag.FlagSet to configure the daemon
 func installCommonConfigFlags(conf *config.Config, flags *pflag.FlagSet) error {
-	var err error
-	conf.Pidfile, err = getDefaultPidFile()
-	if err != nil {
-		return err
-	}
-	conf.Root, err = getDefaultDataRoot()
-	if err != nil {
-		return err
-	}
-	conf.ExecRoot, err = getDefaultExecRoot()
-	if err != nil {
-		return err
-	}
-
 	var (
 		allowNonDistributable = opts.NewNamedListOptsRef("allow-nondistributable-artifacts", &conf.AllowNondistributableArtifacts, registry.ValidateIndexName)
 		registryMirrors       = opts.NewNamedListOptsRef("registry-mirrors", &conf.Mirrors, registry.ValidateMirror)
@@ -44,8 +27,8 @@ func installCommonConfigFlags(conf *config.Config, flags *pflag.FlagSet) error {
 	flags.StringVar(&conf.ContainerdAddr, "containerd", "", "containerd grpc address")
 	flags.BoolVar(&conf.CriContainerd, "cri-containerd", false, "start containerd with cri")
 
-	flags.IntVar(&conf.Mtu, "mtu", 0, "Set the containers network MTU")
-	flags.IntVar(&conf.NetworkControlPlaneMTU, "network-control-plane-mtu", config.DefaultNetworkMtu, "Network Control plane MTU")
+	flags.IntVar(&conf.Mtu, "mtu", conf.Mtu, "Set the containers network MTU")
+	flags.IntVar(&conf.NetworkControlPlaneMTU, "network-control-plane-mtu", conf.NetworkControlPlaneMTU, "Network Control plane MTU")
 	flags.IntVar(&conf.NetworkDiagnosticPort, "network-diagnostic-port", 0, "TCP port number of the network diagnostic server")
 	_ = flags.MarkHidden("network-diagnostic-port")
 
@@ -59,19 +42,19 @@ func installCommonConfigFlags(conf *config.Config, flags *pflag.FlagSet) error {
 	flags.Var(opts.NewNamedMapOpts("log-opts", conf.LogConfig.Config, nil), "log-opt", "Default log driver options for containers")
 
 	flags.StringVar(&conf.CorsHeaders, "api-cors-header", "", "Set CORS headers in the Engine API")
-	flags.IntVar(&conf.MaxConcurrentDownloads, "max-concurrent-downloads", config.DefaultMaxConcurrentDownloads, "Set the max concurrent downloads for each pull")
-	flags.IntVar(&conf.MaxConcurrentUploads, "max-concurrent-uploads", config.DefaultMaxConcurrentUploads, "Set the max concurrent uploads for each push")
-	flags.IntVar(&conf.MaxDownloadAttempts, "max-download-attempts", config.DefaultDownloadAttempts, "Set the max download attempts for each pull")
-	flags.IntVar(&conf.ShutdownTimeout, "shutdown-timeout", config.DefaultShutdownTimeout, "Set the default shutdown timeout")
+	flags.IntVar(&conf.MaxConcurrentDownloads, "max-concurrent-downloads", conf.MaxConcurrentDownloads, "Set the max concurrent downloads")
+	flags.IntVar(&conf.MaxConcurrentUploads, "max-concurrent-uploads", conf.MaxConcurrentUploads, "Set the max concurrent uploads")
+	flags.IntVar(&conf.MaxDownloadAttempts, "max-download-attempts", conf.MaxDownloadAttempts, "Set the max download attempts for each pull")
+	flags.IntVar(&conf.ShutdownTimeout, "shutdown-timeout", conf.ShutdownTimeout, "Set the default shutdown timeout")
 
 	flags.StringVar(&conf.SwarmDefaultAdvertiseAddr, "swarm-default-advertise-addr", "", "Set default address or interface for swarm advertised address")
 	flags.BoolVar(&conf.Experimental, "experimental", false, "Enable experimental features")
 	flags.StringVar(&conf.MetricsAddress, "metrics-addr", "", "Set default address and port to serve the metrics api on")
 	flags.Var(opts.NewNamedListOptsRef("node-generic-resources", &conf.NodeGenericResources, opts.ValidateSingleGenericResource), "node-generic-resource", "Advertise user-defined resource")
 
-	flags.StringVar(&conf.ContainerdNamespace, "containerd-namespace", config.DefaultContainersNamespace, "Containerd namespace to use")
-	flags.StringVar(&conf.ContainerdPluginNamespace, "containerd-plugins-namespace", config.DefaultPluginNamespace, "Containerd namespace to use for plugins")
-	flags.StringVar(&conf.DefaultRuntime, "default-runtime", config.StockRuntimeName, "Default OCI runtime for containers")
+	flags.StringVar(&conf.ContainerdNamespace, "containerd-namespace", conf.ContainerdNamespace, "Containerd namespace to use")
+	flags.StringVar(&conf.ContainerdPluginNamespace, "containerd-plugins-namespace", conf.ContainerdPluginNamespace, "Containerd namespace to use for plugins")
+	flags.StringVar(&conf.DefaultRuntime, "default-runtime", conf.DefaultRuntime, "Default OCI runtime for containers")
 
 	flags.StringVar(&conf.HTTPProxy, "http-proxy", "", "HTTP proxy URL to use for outgoing traffic")
 	flags.StringVar(&conf.HTTPSProxy, "https-proxy", "", "HTTPS proxy URL to use for outgoing traffic")
@@ -79,18 +62,8 @@ func installCommonConfigFlags(conf *config.Config, flags *pflag.FlagSet) error {
 
 	// Deprecated flags / options
 
-	// "--graph" is "soft-deprecated" in favor of "data-root". This flag was added
-	// before Docker 1.0, so won't be removed, only hidden, to discourage its usage.
-	flags.StringVarP(&conf.Root, "graph", "g", conf.Root, "Root of the Docker runtime")
-	_ = flags.MarkHidden("graph")
 	flags.BoolVarP(&conf.AutoRestart, "restart", "r", true, "--restart on the daemon has been deprecated in favor of --restart policies on docker run")
 	_ = flags.MarkDeprecated("restart", "Please use a restart policy on docker run")
-	flags.StringVar(&conf.ClusterAdvertise, "cluster-advertise", "", "Address or interface name to advertise")
-	_ = flags.MarkDeprecated("cluster-advertise", "Swarm classic is deprecated. Please use Swarm-mode (docker swarm init)")
-	flags.StringVar(&conf.ClusterStore, "cluster-store", "", "URL of the distributed storage backend")
-	_ = flags.MarkDeprecated("cluster-store", "Swarm classic is deprecated. Please use Swarm-mode (docker swarm init)")
-	flags.Var(opts.NewNamedMapOpts("cluster-store-opts", conf.ClusterOpts, nil), "cluster-store-opt", "Set cluster store options")
-	_ = flags.MarkDeprecated("cluster-store-opt", "Swarm classic is deprecated. Please use Swarm-mode (docker swarm init)")
 
 	return nil
 }

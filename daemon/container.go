@@ -16,7 +16,6 @@ import (
 	"github.com/docker/docker/oci/caps"
 	"github.com/docker/docker/opts"
 	"github.com/docker/docker/pkg/system"
-	"github.com/docker/docker/pkg/truncindex"
 	"github.com/docker/docker/runconfig"
 	volumemounts "github.com/docker/docker/volume/mounts"
 	"github.com/docker/go-connections/nat"
@@ -28,11 +27,11 @@ import (
 
 // GetContainer looks for a container using the provided information, which could be
 // one of the following inputs from the caller:
-//  - A full container ID, which will exact match a container in daemon's list
-//  - A container name, which will only exact match via the GetByName() function
-//  - A partial container ID prefix (e.g. short ID) of any length that is
-//    unique enough to only return a single container object
-//  If none of these searches succeed, an error is returned
+//   - A full container ID, which will exact match a container in daemon's list
+//   - A container name, which will only exact match via the GetByName() function
+//   - A partial container ID prefix (e.g. short ID) of any length that is
+//     unique enough to only return a single container object
+//     If none of these searches succeed, an error is returned
 func (daemon *Daemon) GetContainer(prefixOrName string) (*container.Container, error) {
 	if len(prefixOrName) == 0 {
 		return nil, errors.WithStack(invalidIdentifier(prefixOrName))
@@ -49,15 +48,22 @@ func (daemon *Daemon) GetContainer(prefixOrName string) (*container.Container, e
 		return containerByName, nil
 	}
 
-	containerID, indexError := daemon.idIndex.Get(prefixOrName)
-	if indexError != nil {
-		// When truncindex defines an error type, use that instead
-		if indexError == truncindex.ErrNotExist {
-			return nil, containerNotFound(prefixOrName)
-		}
-		return nil, errdefs.System(indexError)
+	containerID, err := daemon.containersReplica.GetByPrefix(prefixOrName)
+	if err != nil {
+		return nil, err
 	}
-	return daemon.containers.Get(containerID), nil
+	ctr := daemon.containers.Get(containerID)
+	if ctr == nil {
+		// Updates to the daemon.containersReplica ViewDB are not atomic
+		// or consistent w.r.t. the live daemon.containers Store so
+		// while reaching this code path may be indicative of a bug,
+		// it is not _necessarily_ the case.
+		logrus.WithField("prefixOrName", prefixOrName).
+			WithField("id", containerID).
+			Debugf("daemon.GetContainer: container is known to daemon.containersReplica but not daemon.containers")
+		return nil, containerNotFound(prefixOrName)
+	}
+	return ctr, nil
 }
 
 // checkContainer make sure the specified container validates the specified conditions
@@ -119,7 +125,6 @@ func (daemon *Daemon) Register(c *container.Container) error {
 	defer c.Unlock()
 
 	daemon.containers.Add(c.ID, c)
-	daemon.idIndex.Add(c.ID)
 	return c.CheckpointTo(daemon.containersReplica)
 }
 
@@ -156,7 +161,7 @@ func (daemon *Daemon) newContainer(name string, operatingSystem string, config *
 	base.ImageID = imgID
 	base.NetworkSettings = &network.Settings{IsAnonymousEndpoint: noExplicitName}
 	base.Name = name
-	base.Driver = daemon.imageService.GraphDriverName()
+	base.Driver = daemon.imageService.StorageDriver()
 	base.OS = operatingSystem
 	return base, err
 }
@@ -224,7 +229,7 @@ func (daemon *Daemon) setHostConfig(container *container.Container, hostConfig *
 
 	runconfig.SetDefaultNetModeIfBlank(hostConfig)
 	container.HostConfig = hostConfig
-	return container.CheckpointTo(daemon.containersReplica)
+	return nil
 }
 
 // verifyContainerSettings performs validation of the hostconfig and config
@@ -299,6 +304,11 @@ func validateHostConfig(hostConfig *containertypes.HostConfig) error {
 	}
 	if !hostConfig.Isolation.IsValid() {
 		return errors.Errorf("invalid isolation '%s' on %s", hostConfig.Isolation, runtime.GOOS)
+	}
+	for k := range hostConfig.Annotations {
+		if k == "" {
+			return errors.Errorf("invalid Annotations: the empty string is not permitted as an annotation key")
+		}
 	}
 	return nil
 }

@@ -363,7 +363,7 @@ func TestCreateServiceConfigFileMode(t *testing.T) {
 //
 // To test this, we're going to create a service with the sysctl option
 //
-//   {"net.ipv4.ip_nonlocal_bind": "0"}
+//	{"net.ipv4.ip_nonlocal_bind": "0"}
 //
 // We'll get the service's tasks to get the container ID, and then we'll
 // inspect the container. If the output of the container inspect contains the
@@ -398,7 +398,6 @@ func TestCreateServiceSysctls(t *testing.T) {
 	// net.ipv4.ip_nonlocal_bind is, we can verify that setting the sysctl
 	// options works
 	for _, expected := range []string{"0", "1"} {
-
 		// store the map we're going to be using everywhere.
 		expectedSysctls := map[string]string{"net.ipv4.ip_nonlocal_bind": expected}
 
@@ -458,7 +457,7 @@ func TestCreateServiceSysctls(t *testing.T) {
 //
 // To test this, we're going to create a service with the capabilities option
 //
-//   []string{"CAP_NET_RAW", "CAP_SYS_CHROOT"}
+//	[]string{"CAP_NET_RAW", "CAP_SYS_CHROOT"}
 //
 // We'll get the service's tasks to get the container ID, and then we'll
 // inspect the container. If the output of the container inspect contains the

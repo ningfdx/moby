@@ -5,12 +5,12 @@ import (
 	"strings"
 	"time"
 
+	gogotypes "github.com/gogo/protobuf/types"
 	"github.com/moby/swarmkit/v2/api"
 	"github.com/moby/swarmkit/v2/ca"
 	"github.com/moby/swarmkit/v2/log"
 	"github.com/moby/swarmkit/v2/manager/encryption"
 	"github.com/moby/swarmkit/v2/manager/state/store"
-	gogotypes "github.com/gogo/protobuf/types"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -119,7 +119,7 @@ func (s *Server) UpdateCluster(ctx context.Context, request *api.UpdateClusterRe
 		}
 		// This ensures that we have the current rootCA with which to generate tokens (expiration doesn't matter
 		// for generating the tokens)
-		rootCA, err := ca.RootCAFromAPI(ctx, &cluster.RootCA, ca.DefaultNodeCertExpiration)
+		rootCA, err := ca.RootCAFromAPI(&cluster.RootCA, ca.DefaultNodeCertExpiration)
 		if err != nil {
 			log.G(ctx).WithField(
 				"method", "(*controlapi.Server).UpdateCluster").WithError(err).Error("invalid cluster root CA")

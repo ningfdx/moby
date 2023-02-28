@@ -4,10 +4,11 @@ import (
 	"context"
 	"strconv"
 
-	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/filters"
-	registrytypes "github.com/docker/docker/api/types/registry"
+	"github.com/docker/docker/api/types/registry"
 	"github.com/docker/docker/dockerversion"
+	"github.com/docker/docker/errdefs"
+	"github.com/pkg/errors"
 )
 
 var acceptedSearchFilterTags = map[string]bool{
@@ -22,35 +23,28 @@ var acceptedSearchFilterTags = map[string]bool{
 // TODO: this could be implemented in a registry service instead of the image
 // service.
 func (i *ImageService) SearchRegistryForImages(ctx context.Context, searchFilters filters.Args, term string, limit int,
-	authConfig *types.AuthConfig,
-	headers map[string][]string) (*registrytypes.SearchResults, error) {
-
+	authConfig *registry.AuthConfig,
+	headers map[string][]string) (*registry.SearchResults, error) {
 	if err := searchFilters.Validate(acceptedSearchFilterTags); err != nil {
 		return nil, err
 	}
 
-	var isAutomated, isOfficial bool
-	var hasStarFilter = 0
-	if searchFilters.Contains("is-automated") {
-		if searchFilters.UniqueExactMatch("is-automated", "true") {
-			isAutomated = true
-		} else if !searchFilters.UniqueExactMatch("is-automated", "false") {
-			return nil, invalidFilter{"is-automated", searchFilters.Get("is-automated")}
-		}
+	isAutomated, err := searchFilters.GetBoolOrDefault("is-automated", false)
+	if err != nil {
+		return nil, err
 	}
-	if searchFilters.Contains("is-official") {
-		if searchFilters.UniqueExactMatch("is-official", "true") {
-			isOfficial = true
-		} else if !searchFilters.UniqueExactMatch("is-official", "false") {
-			return nil, invalidFilter{"is-official", searchFilters.Get("is-official")}
-		}
+	isOfficial, err := searchFilters.GetBoolOrDefault("is-official", false)
+	if err != nil {
+		return nil, err
 	}
+
+	hasStarFilter := 0
 	if searchFilters.Contains("stars") {
 		hasStars := searchFilters.Get("stars")
 		for _, hasStar := range hasStars {
 			iHasStar, err := strconv.Atoi(hasStar)
 			if err != nil {
-				return nil, invalidFilter{"stars", hasStar}
+				return nil, errdefs.InvalidParameter(errors.Wrapf(err, "invalid filter 'stars=%s'", hasStar))
 			}
 			if iHasStar > hasStarFilter {
 				hasStarFilter = iHasStar
@@ -63,7 +57,7 @@ func (i *ImageService) SearchRegistryForImages(ctx context.Context, searchFilter
 		return nil, err
 	}
 
-	filteredResults := []registrytypes.SearchResult{}
+	filteredResults := []registry.SearchResult{}
 	for _, result := range unfilteredResult.Results {
 		if searchFilters.Contains("is-automated") {
 			if isAutomated != result.IsAutomated {
@@ -83,7 +77,7 @@ func (i *ImageService) SearchRegistryForImages(ctx context.Context, searchFilter
 		filteredResults = append(filteredResults, result)
 	}
 
-	return &registrytypes.SearchResults{
+	return &registry.SearchResults{
 		Query:      unfilteredResult.Query,
 		NumResults: len(filteredResults),
 		Results:    filteredResults,

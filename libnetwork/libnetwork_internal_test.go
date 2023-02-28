@@ -188,7 +188,7 @@ func TestEndpointMarshalling(t *testing.T) {
 		lla = append(lla, ll)
 	}
 
-	e := &endpoint{
+	e := &Endpoint{
 		name:      "Bau",
 		id:        "efghijklmno",
 		sandboxID: "ambarabaciccicocco",
@@ -213,7 +213,7 @@ func TestEndpointMarshalling(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	ee := &endpoint{}
+	ee := &Endpoint{}
 	err = json.Unmarshal(b, ee)
 	if err != nil {
 		t.Fatal(err)
@@ -312,13 +312,15 @@ func compareNwLists(a, b []*net.IPNet) bool {
 }
 
 func TestAuxAddresses(t *testing.T) {
+	defer testutils.SetupTestOSContext(t)()
+
 	c, err := New()
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer c.Stop()
 
-	n := &network{ipamType: ipamapi.DefaultIPAM, networkType: "bridge", ctrlr: c.(*controller)}
+	n := &network{ipamType: ipamapi.DefaultIPAM, networkType: "bridge", ctrlr: c}
 
 	input := []struct {
 		masterPool   string
@@ -334,7 +336,6 @@ func TestAuxAddresses(t *testing.T) {
 	}
 
 	for _, i := range input {
-
 		n.ipamV4Config = []*IpamConf{{PreferredPool: i.masterPool, SubPool: i.subPool, AuxAddresses: i.auxAddresses}}
 
 		err = n.ipamAllocate()
@@ -349,6 +350,8 @@ func TestAuxAddresses(t *testing.T) {
 
 func TestSRVServiceQuery(t *testing.T) {
 	skip.If(t, runtime.GOOS == "windows", "test only works on linux")
+
+	defer testutils.SetupTestOSContext(t)()
 
 	c, err := New()
 	if err != nil {
@@ -418,7 +421,7 @@ func TestSRVServiceQuery(t *testing.T) {
 	sr.service["web.swarm"] = append(sr.service["web.swarm"], httpPort)
 	sr.service["web.swarm"] = append(sr.service["web.swarm"], extHTTPPort)
 
-	c.(*controller).svcRecords[n.ID()] = sr
+	c.svcRecords[n.ID()] = sr
 
 	_, ip := ep.Info().Sandbox().ResolveService("_http._tcp.web.swarm")
 
@@ -447,6 +450,8 @@ func TestSRVServiceQuery(t *testing.T) {
 
 func TestServiceVIPReuse(t *testing.T) {
 	skip.If(t, runtime.GOOS == "windows", "test only works on linux")
+
+	defer testutils.SetupTestOSContext(t)()
 
 	c, err := New()
 	if err != nil {
@@ -563,23 +568,15 @@ func TestServiceVIPReuse(t *testing.T) {
 func TestIpamReleaseOnNetDriverFailures(t *testing.T) {
 	skip.If(t, runtime.GOOS == "windows", "test only works on linux")
 
-	if !testutils.IsRunningInContainer() {
-		defer testutils.SetupTestOSContext(t)()
-	}
+	defer testutils.SetupTestOSContext(t)()
 
-	cfgOptions, err := OptionBoltdbWithRandomDBFile()
-	if err != nil {
-		t.Fatal(err)
-	}
-	c, err := New(cfgOptions...)
+	c, err := New(OptionBoltdbWithRandomDBFile(t))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer c.Stop()
 
-	cc := c.(*controller)
-
-	if err := cc.drvRegistry.AddDriver(badDriverName, badDriverInit, nil); err != nil {
+	if err := badDriverRegister(&c.drvRegistry); err != nil {
 		t.Fatal(err)
 	}
 
@@ -630,7 +627,7 @@ func TestIpamReleaseOnNetDriverFailures(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer ep.Delete(false) // nolint:errcheck
+	defer ep.Delete(false) //nolint:errcheck
 
 	expectedIP, _ := types.ParseCIDR("10.35.0.1/16")
 	if !types.CompareIPNet(ep.Info().Iface().Address(), expectedIP) {
@@ -646,7 +643,7 @@ type badDriver struct {
 
 var bd = badDriver{failNetworkCreation: true}
 
-func badDriverInit(reg driverapi.DriverCallback, opt map[string]interface{}) error {
+func badDriverRegister(reg driverapi.Registerer) error {
 	return reg.RegisterDriver(badDriverName, &bd, driverapi.Capability{DataScope: datastore.LocalScope})
 }
 

@@ -46,10 +46,10 @@ func (daemon *Daemon) ContainerInspectCurrent(name string, size bool) (*types.Co
 	}
 
 	apiNetworks := make(map[string]*networktypes.EndpointSettings)
-	for name, epConf := range ctr.NetworkSettings.Networks {
+	for nwName, epConf := range ctr.NetworkSettings.Networks {
 		if epConf.EndpointSettings != nil {
 			// We must make a copy of this pointer object otherwise it can race with other operations
-			apiNetworks[name] = epConf.EndpointSettings.Copy()
+			apiNetworks[nwName] = epConf.EndpointSettings.Copy()
 		}
 	}
 
@@ -93,34 +93,30 @@ func (daemon *Daemon) ContainerInspectCurrent(name string, size bool) (*types.Co
 
 // containerInspect120 serializes the master version of a container into a json type.
 func (daemon *Daemon) containerInspect120(name string) (*v1p20.ContainerJSON, error) {
-	container, err := daemon.GetContainer(name)
+	ctr, err := daemon.GetContainer(name)
 	if err != nil {
 		return nil, err
 	}
 
-	container.Lock()
-	defer container.Unlock()
+	ctr.Lock()
+	defer ctr.Unlock()
 
-	base, err := daemon.getInspectData(container)
+	base, err := daemon.getInspectData(ctr)
 	if err != nil {
 		return nil, err
 	}
-
-	mountPoints := container.GetMountPoints()
-	config := &v1p20.ContainerConfig{
-		Config:          container.Config,
-		MacAddress:      container.Config.MacAddress,
-		NetworkDisabled: container.Config.NetworkDisabled,
-		ExposedPorts:    container.Config.ExposedPorts,
-		VolumeDriver:    container.HostConfig.VolumeDriver,
-	}
-	networkSettings := daemon.getBackwardsCompatibleNetworkSettings(container.NetworkSettings)
 
 	return &v1p20.ContainerJSON{
 		ContainerJSONBase: base,
-		Mounts:            mountPoints,
-		Config:            config,
-		NetworkSettings:   networkSettings,
+		Mounts:            ctr.GetMountPoints(),
+		Config: &v1p20.ContainerConfig{
+			Config:          ctr.Config,
+			MacAddress:      ctr.Config.MacAddress,
+			NetworkDisabled: ctr.Config.NetworkDisabled,
+			ExposedPorts:    ctr.Config.ExposedPorts,
+			VolumeDriver:    ctr.HostConfig.VolumeDriver,
+		},
+		NetworkSettings: daemon.getBackwardsCompatibleNetworkSettings(ctr.NetworkSettings),
 	}, nil
 }
 
@@ -184,6 +180,11 @@ func (daemon *Daemon) getInspectData(container *container.Container) (*types.Con
 
 	contJSONBase.GraphDriver.Name = container.Driver
 
+	if daemon.UsesSnapshotter() {
+		// Additional information only applies to graphDrivers, so we're done.
+		return contJSONBase, nil
+	}
+
 	if container.RWLayer == nil {
 		if container.Dead {
 			return contJSONBase, nil
@@ -192,17 +193,16 @@ func (daemon *Daemon) getInspectData(container *container.Container) (*types.Con
 	}
 
 	graphDriverData, err := container.RWLayer.Metadata()
-	// If container is marked as Dead, the container's graphdriver metadata
-	// could have been removed, it will cause error if we try to get the metadata,
-	// we can ignore the error if the container is dead.
 	if err != nil {
-		if !container.Dead {
-			return nil, errdefs.System(err)
+		if container.Dead {
+			// container is marked as Dead, and its graphDriver metadata may
+			// have been removed; we can ignore errors.
+			return contJSONBase, nil
 		}
-	} else {
-		contJSONBase.GraphDriver.Data = graphDriverData
+		return nil, errdefs.System(err)
 	}
 
+	contJSONBase.GraphDriver.Data = graphDriverData
 	return contJSONBase, nil
 }
 
@@ -214,11 +214,17 @@ func (daemon *Daemon) ContainerExecInspect(id string) (*backend.ExecInspect, err
 		return nil, errExecNotFound(id)
 	}
 
-	if ctr := daemon.containers.Get(e.ContainerID); ctr == nil {
+	if ctr := daemon.containers.Get(e.Container.ID); ctr == nil {
 		return nil, errExecNotFound(id)
 	}
 
+	e.Lock()
+	defer e.Unlock()
 	pc := inspectExecProcessConfig(e)
+	var pid int
+	if e.Process != nil {
+		pid = int(e.Process.Pid())
+	}
 
 	return &backend.ExecInspect{
 		ID:            e.ID,
@@ -229,9 +235,9 @@ func (daemon *Daemon) ContainerExecInspect(id string) (*backend.ExecInspect, err
 		OpenStdout:    e.OpenStdout,
 		OpenStderr:    e.OpenStderr,
 		CanRemove:     e.CanRemove,
-		ContainerID:   e.ContainerID,
+		ContainerID:   e.Container.ID,
 		DetachKeys:    e.DetachKeys,
-		Pid:           e.Pid,
+		Pid:           pid,
 	}, nil
 }
 

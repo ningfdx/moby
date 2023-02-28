@@ -1,21 +1,7 @@
-.PHONY: all binary dynbinary build cross help install manpages run shell test test-docker-py test-integration test-unit validate win
+.PHONY: all binary dynbinary build cross help install manpages run shell test test-docker-py test-integration test-unit validate validate-% win
 
-BUILDX_VERSION ?= v0.8.2
-
-ifdef USE_BUILDX
-BUILDX ?= $(shell command -v buildx)
-BUILDX ?= $(shell command -v docker-buildx)
-DOCKER_BUILDX_CLI_PLUGIN_PATH ?= ~/.docker/cli-plugins/docker-buildx
-BUILDX ?= $(shell if [ -x "$(DOCKER_BUILDX_CLI_PLUGIN_PATH)" ]; then echo $(DOCKER_BUILDX_CLI_PLUGIN_PATH); fi)
-endif
-
-ifndef USE_BUILDX
-DOCKER_BUILDKIT := 1
-export DOCKER_BUILDKIT
-endif
-
-BUILDX ?= bundles/buildx
 DOCKER ?= docker
+BUILDX ?= $(DOCKER) buildx
 
 # set the graph driver as the current graphdriver if not set
 DOCKER_GRAPHDRIVER := $(if $(DOCKER_GRAPHDRIVER),$(DOCKER_GRAPHDRIVER),$(shell docker info 2>&1 | grep "Storage Driver" | sed 's/.*: //'))
@@ -45,7 +31,6 @@ export VALIDATE_ORIGIN_BRANCH
 # make DOCKER_LDFLAGS="-X github.com/docker/docker/daemon/graphdriver.priority=overlay2,devicemapper" dynbinary
 #
 DOCKER_ENVS := \
-	-e DOCKER_CROSSPLATFORMS \
 	-e BUILD_APT_MIRROR \
 	-e BUILDFLAGS \
 	-e KEEPBUNDLE \
@@ -69,10 +54,13 @@ DOCKER_ENVS := \
 	-e DOCKER_USERLANDPROXY \
 	-e DOCKERD_ARGS \
 	-e DELVE_PORT \
+	-e GITHUB_ACTIONS \
 	-e TEST_FORCE_VALIDATE \
 	-e TEST_INTEGRATION_DIR \
+	-e TEST_INTEGRATION_USE_SNAPSHOTTER \
 	-e TEST_SKIP_INTEGRATION \
 	-e TEST_SKIP_INTEGRATION_CLI \
+	-e TESTCOVERAGE \
 	-e TESTDEBUG \
 	-e TESTDIRS \
 	-e TESTFLAGS \
@@ -118,7 +106,7 @@ DOCKER_IMAGE := docker-dev
 DOCKER_PORT_FORWARD := $(if $(DOCKER_PORT),-p "$(DOCKER_PORT)",)
 DELVE_PORT_FORWARD := $(if $(DELVE_PORT),-p "$(DELVE_PORT)",)
 
-DOCKER_FLAGS := $(DOCKER) run --rm -i --privileged $(DOCKER_CONTAINER_NAME) $(DOCKER_ENVS) $(DOCKER_MOUNT) $(DOCKER_PORT_FORWARD) $(DELVE_PORT_FORWARD)
+DOCKER_FLAGS := $(DOCKER) run --rm --privileged $(DOCKER_CONTAINER_NAME) $(DOCKER_ENVS) $(DOCKER_MOUNT) $(DOCKER_PORT_FORWARD) $(DELVE_PORT_FORWARD)
 BUILD_APT_MIRROR := $(if $(DOCKER_BUILD_APT_MIRROR),--build-arg APT_MIRROR=$(DOCKER_BUILD_APT_MIRROR))
 export BUILD_APT_MIRROR
 
@@ -137,6 +125,14 @@ ifeq ($(INTERACTIVE), 1)
 	DOCKER_FLAGS += -t
 endif
 
+# on GitHub Runners input device is not a TTY but we allocate a pseudo-one,
+# otherwise keep STDIN open even if not attached if not a GitHub Runner.
+ifeq ($(GITHUB_ACTIONS),true)
+	DOCKER_FLAGS += -t
+else
+	DOCKER_FLAGS += -i
+endif
+
 DOCKER_RUN_DOCKER := $(DOCKER_FLAGS) "$(DOCKER_IMAGE)"
 
 DOCKER_BUILD_ARGS += --build-arg=GO_VERSION
@@ -145,42 +141,25 @@ DOCKER_BUILD_ARGS += --build-arg=SYSTEMD=true
 endif
 
 BUILD_OPTS := ${BUILD_APT_MIRROR} ${DOCKER_BUILD_ARGS} ${DOCKER_BUILD_OPTS} -f "$(DOCKERFILE)"
-ifdef USE_BUILDX
-BUILD_OPTS += $(BUILDX_BUILD_EXTRA_OPTS)
 BUILD_CMD := $(BUILDX) build
-else
-BUILD_CMD := $(DOCKER) build
-endif
-
-# This is used for the legacy "build" target and anything still depending on it
-BUILD_CROSS =
-ifdef DOCKER_CROSS
-BUILD_CROSS = --build-arg CROSS=$(DOCKER_CROSS)
-endif
-ifdef DOCKER_CROSSPLATFORMS
-BUILD_CROSS = --build-arg CROSS=true
-endif
-
-VERSION_AUTOGEN_ARGS = --build-arg VERSION --build-arg DOCKER_GITCOMMIT --build-arg PRODUCT --build-arg PLATFORM --build-arg DEFAULT_PRODUCT_LICENSE --build-arg PACKAGER_NAME
+BAKE_CMD := $(BUILDX) bake
 
 default: binary
 
 all: build ## validate all checks, build linux binaries, run all tests,\ncross build non-linux binaries, and generate archives
 	$(DOCKER_RUN_DOCKER) bash -c 'hack/validate/default && hack/make.sh'
 
-
-binary: buildx ## build statically linked linux binaries
+binary: bundles ## build statically linked linux binaries
 	echo $(VERSION_AUTOGEN_ARGS)
 	echo "last version: dockerd-20.10.17-umd17"
 	echo $(VERSION)
-	$(BUILD_CMD) $(BUILD_OPTS) --output=bundles/ --target=$@ $(VERSION_AUTOGEN_ARGS) .
+	$(BAKE_CMD) binary
 
-dynbinary: buildx ## build dynamically linked linux binaries
-	$(BUILD_CMD) $(BUILD_OPTS) --output=bundles/ --target=$@ $(VERSION_AUTOGEN_ARGS) .
+dynbinary: bundles ## build dynamically linked linux binaries
+	$(BAKE_CMD) dynbinary
 
-cross: BUILD_OPTS += --build-arg CROSS=true --build-arg DOCKER_CROSSPLATFORMS
-cross: buildx ## cross build the binaries for darwin, freebsd and\nwindows
-	$(BUILD_CMD) $(BUILD_OPTS) --output=bundles/ --target=$@ $(VERSION_AUTOGEN_ARGS) .
+cross: bundles ## cross build the binaries
+	$(BAKE_CMD) binary-cross
 
 bundles:
 	mkdir bundles
@@ -203,21 +182,18 @@ run: build ## run the docker daemon in a container
  
 .PHONY: build
 ifeq ($(BIND_DIR), .)
-build: shell_target := --target=dev
+build: shell_target := --target=dev-base
 else
-build: shell_target := --target=final
+build: shell_target := --target=dev
 endif
-ifdef USE_BUILDX
-build: buildx_load := --load
-endif
-build: buildx
-	$(BUILD_CMD) $(BUILD_OPTS) $(shell_target) $(buildx_load) $(BUILD_CROSS) -t "$(DOCKER_IMAGE)" .
+build: bundles
+	$(BUILD_CMD) $(BUILD_OPTS) $(shell_target) --load -t "$(DOCKER_IMAGE)" .
 
 shell: build  ## start a shell inside the build env
 	$(DOCKER_RUN_DOCKER) bash
 
 test: build test-unit ## run the unit, integration and docker-py tests
-	$(DOCKER_RUN_DOCKER) hack/make.sh dynbinary cross test-integration test-docker-py
+	$(DOCKER_RUN_DOCKER) hack/make.sh dynbinary test-integration test-docker-py
 
 test-docker-py: build ## run the docker-py tests
 	$(DOCKER_RUN_DOCKER) hack/make.sh dynbinary test-docker-py
@@ -241,8 +217,11 @@ test-unit: build ## run the unit tests
 validate: build ## validate DCO, Seccomp profile generation, gofmt,\n./pkg/ isolation, golint, tests, tomls, go vet and vendor
 	$(DOCKER_RUN_DOCKER) hack/validate/all
 
-win: build ## cross build the binary for windows
-	$(DOCKER_RUN_DOCKER) DOCKER_CROSSPLATFORMS=windows/amd64 hack/make.sh cross
+validate-%: build ## validate specific check
+	$(DOCKER_RUN_DOCKER) hack/validate/$*
+
+win: bundles ## cross build the binary for windows
+	$(BAKE_CMD) --set *.platform=windows/amd64 binary
 
 .PHONY: swagger-gen
 swagger-gen:
@@ -259,14 +238,3 @@ swagger-docs: ## preview the API documentation
 		-e 'REDOC_OPTIONS=hide-hostname="true" lazy-rendering' \
 		-p $(SWAGGER_DOCS_PORT):80 \
 		bfirsh/redoc:1.14.0
-
-.PHONY: buildx
-ifdef USE_BUILDX
-ifeq ($(BUILDX), bundles/buildx)
-buildx: bundles/buildx ## build buildx cli tool
-endif
-endif
-
-bundles/buildx: bundles ## build buildx CLI tool
-	curl -fsSL https://raw.githubusercontent.com/moby/buildkit/70deac12b5857a1aa4da65e90b262368e2f71500/hack/install-buildx | VERSION="$(BUILDX_VERSION)" BINDIR="$(@D)" bash
-	$@ version

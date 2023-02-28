@@ -46,10 +46,10 @@ import (
 	"github.com/docker/docker/pkg/jsonmessage"
 	"github.com/docker/docker/pkg/pidfile"
 	"github.com/docker/docker/pkg/plugingetter"
+	"github.com/docker/docker/pkg/rootless"
 	"github.com/docker/docker/pkg/sysinfo"
 	"github.com/docker/docker/pkg/system"
 	"github.com/docker/docker/plugin"
-	"github.com/docker/docker/rootless"
 	"github.com/docker/docker/runconfig"
 	"github.com/docker/go-connections/tlsconfig"
 	"github.com/moby/buildkit/session"
@@ -76,12 +76,7 @@ func NewDaemonCli() *DaemonCli {
 }
 
 func (cli *DaemonCli) start(opts *daemonOptions) (err error) {
-	opts.setDefaultOptions()
-
 	if cli.Config, err = loadDaemonCliConfig(opts); err != nil {
-		return err
-	}
-	if err := checkDeprecatedOptions(cli.Config); err != nil {
 		return err
 	}
 
@@ -92,7 +87,7 @@ func (cli *DaemonCli) start(opts *daemonOptions) (err error) {
 
 	if opts.Validate {
 		// If config wasn't OK we wouldn't have made it this far.
-		fmt.Fprintln(os.Stderr, "configuration OK")
+		_, _ = fmt.Fprintln(os.Stderr, "configuration OK")
 		return nil
 	}
 
@@ -144,13 +139,15 @@ func (cli *DaemonCli) start(opts *daemonOptions) (err error) {
 	potentiallyUnderRuntimeDir := []string{cli.Config.ExecRoot}
 
 	if cli.Pidfile != "" {
-		pf, err := pidfile.New(cli.Pidfile)
-		if err != nil {
-			return errors.Wrap(err, "failed to start daemon")
+		if err = system.MkdirAll(filepath.Dir(cli.Pidfile), 0o755); err != nil {
+			return errors.Wrap(err, "failed to create pidfile directory")
+		}
+		if err = pidfile.Write(cli.Pidfile, os.Getpid()); err != nil {
+			return errors.Wrapf(err, "failed to start daemon, ensure docker is not running or delete %s", cli.Pidfile)
 		}
 		potentiallyUnderRuntimeDir = append(potentiallyUnderRuntimeDir, cli.Pidfile)
 		defer func() {
-			if err := pf.Remove(); err != nil {
+			if err := os.Remove(cli.Pidfile); err != nil {
 				logrus.Error(err)
 			}
 		}()
@@ -172,7 +169,7 @@ func (cli *DaemonCli) start(opts *daemonOptions) (err error) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	waitForContainerDShutdown, err := cli.initContainerD(ctx)
+	waitForContainerDShutdown, err := cli.initContainerd(ctx)
 	if waitForContainerDShutdown != nil {
 		defer waitForContainerDShutdown(10 * time.Second)
 	}
@@ -258,7 +255,7 @@ func (cli *DaemonCli) start(opts *daemonOptions) (err error) {
 
 	// notify systemd that we're shutting down
 	notifyStopping()
-	shutdownDaemon(d)
+	shutdownDaemon(ctx, d)
 
 	// Stop notification processing and any background processes
 	cancel()
@@ -293,39 +290,43 @@ func newRouterOptions(config *config.Config, d *daemon.Daemon) (routerOptions, e
 		return opts, err
 	}
 	cgroupParent := newCgroupParent(config)
-	bk, err := buildkit.New(buildkit.Opt{
-		SessionManager:      sm,
-		Root:                filepath.Join(config.Root, "buildkit"),
-		Dist:                d.DistributionServices(),
-		NetworkController:   d.NetworkController(),
-		DefaultCgroupParent: cgroupParent,
-		RegistryHosts:       d.RegistryHosts(),
-		BuilderConfig:       config.Builder,
-		Rootless:            d.Rootless(),
-		IdentityMapping:     d.IdentityMapping(),
-		DNSConfig:           config.DNSConfig,
-		ApparmorProfile:     daemon.DefaultApparmorProfile(),
-	})
-	if err != nil {
-		return opts, err
-	}
-
-	bb, err := buildbackend.NewBackend(d.ImageService(), manager, bk, d.EventsService)
-	if err != nil {
-		return opts, errors.Wrap(err, "failed to create buildmanager")
-	}
-	return routerOptions{
+	ro := routerOptions{
 		sessionManager: sm,
-		buildBackend:   bb,
-		buildkit:       bk,
 		features:       d.Features(),
 		daemon:         d,
-	}, nil
+	}
+	if !d.UsesSnapshotter() {
+		bk, err := buildkit.New(buildkit.Opt{
+			SessionManager:      sm,
+			Root:                filepath.Join(config.Root, "buildkit"),
+			Dist:                d.DistributionServices(),
+			NetworkController:   d.NetworkController(),
+			DefaultCgroupParent: cgroupParent,
+			RegistryHosts:       d.RegistryHosts(),
+			BuilderConfig:       config.Builder,
+			Rootless:            d.Rootless(),
+			IdentityMapping:     d.IdentityMapping(),
+			DNSConfig:           config.DNSConfig,
+			ApparmorProfile:     daemon.DefaultApparmorProfile(),
+		})
+		if err != nil {
+			return opts, err
+		}
+
+		bb, err := buildbackend.NewBackend(d.ImageService(), manager, bk, d.EventsService)
+		if err != nil {
+			return opts, errors.Wrap(err, "failed to create buildmanager")
+		}
+
+		ro.buildBackend = bb
+		ro.buildkit = bk
+	}
+
+	return ro, nil
 }
 
 func (cli *DaemonCli) reloadConfig() {
 	reload := func(c *config.Config) {
-
 		// Revalidate and reload the authorization plugins
 		if err := validateAuthzPlugins(c.AuthorizationPlugins, cli.d.PluginStore); err != nil {
 			logrus.Fatalf("Error validating authorization plugin: %v", err)
@@ -361,40 +362,39 @@ func (cli *DaemonCli) stop() {
 // shutdownDaemon just wraps daemon.Shutdown() to handle a timeout in case
 // d.Shutdown() is waiting too long to kill container or worst it's
 // blocked there
-func shutdownDaemon(d *daemon.Daemon) {
-	shutdownTimeout := d.ShutdownTimeout()
-	ch := make(chan struct{})
-	go func() {
-		d.Shutdown()
-		close(ch)
-	}()
-	if shutdownTimeout < 0 {
-		<-ch
-		logrus.Debug("Clean shutdown succeeded")
-		return
+func shutdownDaemon(ctx context.Context, d *daemon.Daemon) {
+	var cancel context.CancelFunc
+	if timeout := d.ShutdownTimeout(); timeout >= 0 {
+		ctx, cancel = context.WithTimeout(ctx, time.Duration(timeout)*time.Second)
+	} else {
+		ctx, cancel = context.WithCancel(ctx)
 	}
 
-	timeout := time.NewTimer(time.Duration(shutdownTimeout) * time.Second)
-	defer timeout.Stop()
+	go func() {
+		defer cancel()
+		d.Shutdown(ctx)
+	}()
 
-	select {
-	case <-ch:
-		logrus.Debug("Clean shutdown succeeded")
-	case <-timeout.C:
+	<-ctx.Done()
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		logrus.Error("Force shutdown daemon")
+	} else {
+		logrus.Debug("Clean shutdown succeeded")
 	}
 }
 
 func loadDaemonCliConfig(opts *daemonOptions) (*config.Config, error) {
+	if !opts.flags.Parsed() {
+		return nil, errors.New(`cannot load CLI config before flags are parsed`)
+	}
+	opts.setDefaultOptions()
+
 	conf := opts.daemonConfig
 	flags := opts.flags
 	conf.Debug = opts.Debug
 	conf.Hosts = opts.Hosts
 	conf.LogLevel = opts.LogLevel
 
-	if flags.Changed("graph") && flags.Changed("data-root") {
-		return nil, errors.New(`cannot specify both "--graph" and "--data-root" option`)
-	}
 	if flags.Changed(FlagTLS) {
 		conf.TLS = &opts.TLS
 	}
@@ -405,21 +405,13 @@ func loadDaemonCliConfig(opts *daemonOptions) (*config.Config, error) {
 	}
 
 	if opts.TLSOptions != nil {
-		conf.CommonTLSOptions = config.CommonTLSOptions{
+		conf.TLSOptions = config.TLSOptions{
 			CAFile:   opts.TLSOptions.CAFile,
 			CertFile: opts.TLSOptions.CertFile,
 			KeyFile:  opts.TLSOptions.KeyFile,
 		}
 	} else {
-		conf.CommonTLSOptions = config.CommonTLSOptions{}
-	}
-
-	if conf.TrustKeyPath == "" {
-		daemonConfDir, err := getDaemonConfDir(conf.Root)
-		if err != nil {
-			return nil, err
-		}
-		conf.TrustKeyPath = filepath.Join(daemonConfDir, defaultTrustKeyFile)
+		conf.TLSOptions = config.TLSOptions{}
 	}
 
 	if opts.configFile != "" {
@@ -443,10 +435,6 @@ func loadDaemonCliConfig(opts *daemonOptions) (*config.Config, error) {
 
 	if err := config.Validate(conf); err != nil {
 		return nil, err
-	}
-
-	if flags.Changed("graph") {
-		logrus.Warnf(`The "-g / --graph" flag is deprecated. Please use "--data-root" instead`)
 	}
 
 	// Check if duplicate label-keys with different values are found
@@ -510,14 +498,6 @@ func normalizeHosts(config *config.Config) error {
 	return nil
 }
 
-func checkDeprecatedOptions(config *config.Config) error {
-	// Overlay networks with external k/v stores have been deprecated
-	if config.ClusterAdvertise != "" || len(config.ClusterOpts) > 0 || config.ClusterStore != "" {
-		return errors.New("Host-discovery and overlay networks with external k/v stores are deprecated. The 'cluster-advertise', 'cluster-store', and 'cluster-store-opt' options have been removed")
-	}
-	return nil
-}
-
 func initRouter(opts routerOptions) {
 	decoder := runconfig.ContainerDecoder{
 		GetSysInfo: func() *sysinfo.SysInfo {
@@ -544,14 +524,8 @@ func initRouter(opts routerOptions) {
 		distributionrouter.NewRouter(opts.daemon.ImageService()),
 	}
 
-	grpcBackends := []grpcrouter.Backend{}
-	for _, b := range []interface{}{opts.daemon, opts.buildBackend} {
-		if b, ok := b.(grpcrouter.Backend); ok {
-			grpcBackends = append(grpcBackends, b)
-		}
-	}
-	if len(grpcBackends) > 0 {
-		routers = append(routers, grpcrouter.NewRouter(grpcBackends...))
+	if opts.buildBackend != nil {
+		routers = append(routers, grpcrouter.NewRouter(opts.buildBackend))
 	}
 
 	if opts.daemon.NetworkControllerEnabled() {
@@ -598,51 +572,66 @@ func (cli *DaemonCli) getContainerdDaemonOpts() ([]supervisor.DaemonOpt, error) 
 		return nil, err
 	}
 
-	if cli.Config.Debug {
+	if cli.Debug {
 		opts = append(opts, supervisor.WithLogLevel("debug"))
-	} else if cli.Config.LogLevel != "" {
-		opts = append(opts, supervisor.WithLogLevel(cli.Config.LogLevel))
+	} else {
+		opts = append(opts, supervisor.WithLogLevel(cli.LogLevel))
 	}
 
-	if !cli.Config.CriContainerd {
-		opts = append(opts, supervisor.WithPlugin("cri", nil))
+	if !cli.CriContainerd {
+		// CRI support in the managed daemon is currently opt-in.
+		//
+		// It's disabled by default, originally because it was listening on
+		// a TCP connection at 0.0.0.0:10010, which was considered a security
+		// risk, and could conflict with user's container ports.
+		//
+		// Current versions of containerd started now listen on localhost on
+		// an ephemeral port instead, but could still conflict with container
+		// ports, and running kubernetes using the static binaries is not a
+		// common scenario, so we (for now) continue disabling it by default.
+		//
+		// Also see https://github.com/containerd/containerd/issues/2483#issuecomment-407530608
+		opts = append(opts, supervisor.WithCRIDisabled())
 	}
 
 	return opts, nil
 }
 
 func newAPIServerConfig(config *config.Config) (*apiserver.Config, error) {
-	serverConfig := &apiserver.Config{
-		SocketGroup: config.SocketGroup,
-		Version:     dockerversion.Version,
-		CorsHeaders: config.CorsHeaders,
-	}
-
+	var tlsConfig *tls.Config
 	if config.TLS != nil && *config.TLS {
-		tlsOptions := tlsconfig.Options{
-			CAFile:             config.CommonTLSOptions.CAFile,
-			CertFile:           config.CommonTLSOptions.CertFile,
-			KeyFile:            config.CommonTLSOptions.KeyFile,
-			ExclusiveRootPools: true,
-		}
-
+		var (
+			clientAuth tls.ClientAuthType
+			err        error
+		)
 		if config.TLSVerify == nil || *config.TLSVerify {
 			// server requires and verifies client's certificate
-			tlsOptions.ClientAuth = tls.RequireAndVerifyClientCert
+			clientAuth = tls.RequireAndVerifyClientCert
 		}
-		tlsConfig, err := tlsconfig.Server(tlsOptions)
+		tlsConfig, err = tlsconfig.Server(tlsconfig.Options{
+			CAFile:             config.TLSOptions.CAFile,
+			CertFile:           config.TLSOptions.CertFile,
+			KeyFile:            config.TLSOptions.KeyFile,
+			ExclusiveRootPools: true,
+			ClientAuth:         clientAuth,
+		})
 		if err != nil {
 			return nil, errors.Wrap(err, "invalid TLS configuration")
 		}
-		serverConfig.TLSConfig = tlsConfig
 	}
 
-	return serverConfig, nil
+	return &apiserver.Config{
+		SocketGroup: config.SocketGroup,
+		Version:     dockerversion.Version,
+		CorsHeaders: config.CorsHeaders,
+		TLSConfig:   tlsConfig,
+		Hosts:       config.Hosts,
+	}, nil
 }
 
 // checkTLSAuthOK checks basically for an explicitly disabled TLS/TLSVerify
 // Going forward we do not want to support a scenario where dockerd listens
-//   on TCP without either TLS client auth (or an explicit opt-in to disable it)
+// on TCP without either TLS client auth (or an explicit opt-in to disable it)
 func checkTLSAuthOK(c *config.Config) bool {
 	if c.TLS == nil {
 		// Either TLS is enabled by default, in which case TLS verification should be enabled by default, or explicitly disabled
@@ -666,19 +655,17 @@ func checkTLSAuthOK(c *config.Config) bool {
 }
 
 func loadListeners(cli *DaemonCli, serverConfig *apiserver.Config) ([]string, error) {
-	if len(cli.Config.Hosts) == 0 {
+	if len(serverConfig.Hosts) == 0 {
 		return nil, errors.New("no hosts configured")
 	}
 	var hosts []string
 
-	for i := 0; i < len(cli.Config.Hosts); i++ {
-		protoAddr := cli.Config.Hosts[i]
-		protoAddrParts := strings.SplitN(cli.Config.Hosts[i], "://", 2)
-		if len(protoAddrParts) != 2 {
+	for i := 0; i < len(serverConfig.Hosts); i++ {
+		protoAddr := serverConfig.Hosts[i]
+		proto, addr, ok := strings.Cut(protoAddr, "://")
+		if !ok || addr == "" {
 			return nil, fmt.Errorf("bad format %s, expected PROTO://ADDR", protoAddr)
 		}
-
-		proto, addr := protoAddrParts[0], protoAddrParts[1]
 
 		// It's a bad idea to bind to TCP without tlsverify.
 		authEnabled := serverConfig.TLSConfig != nil && serverConfig.TLSConfig.ClientAuth == tls.RequireAndVerifyClientCert
@@ -719,18 +706,18 @@ func loadListeners(cli *DaemonCli, serverConfig *apiserver.Config) ([]string, er
 				}
 			}
 		}
-		ls, err := listeners.Init(proto, addr, serverConfig.SocketGroup, serverConfig.TLSConfig)
-		if err != nil {
-			return nil, err
-		}
 		// If we're binding to a TCP port, make sure that a container doesn't try to use it.
 		if proto == "tcp" {
 			if err := allocateDaemonPort(addr); err != nil {
 				return nil, err
 			}
 		}
+		ls, err := listeners.Init(proto, addr, serverConfig.SocketGroup, serverConfig.TLSConfig)
+		if err != nil {
+			return nil, err
+		}
 		logrus.Debugf("Listener created for HTTP on %s (%s)", proto, addr)
-		hosts = append(hosts, protoAddrParts[1])
+		hosts = append(hosts, addr)
 		cli.api.Accept(addr, ls...)
 	}
 

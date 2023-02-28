@@ -10,7 +10,6 @@ import (
 	"github.com/docker/docker/libnetwork/netlabel"
 	"github.com/docker/docker/libnetwork/netutils"
 	"github.com/docker/docker/libnetwork/ns"
-	"github.com/docker/docker/libnetwork/osl"
 	"github.com/docker/docker/libnetwork/types"
 	"github.com/sirupsen/logrus"
 )
@@ -18,7 +17,6 @@ import (
 // CreateEndpoint assigns the mac, ip and endpoint id for the new container
 func (d *driver) CreateEndpoint(nid, eid string, ifInfo driverapi.InterfaceInfo,
 	epOptions map[string]interface{}) error {
-	defer osl.InitOSContext()()
 
 	if err := validateID(nid, eid); err != nil {
 		return err
@@ -47,7 +45,7 @@ func (d *driver) CreateEndpoint(nid, eid string, ifInfo driverapi.InterfaceInfo,
 	if opt, ok := epOptions[netlabel.PortMap]; ok {
 		if _, ok := opt.([]types.PortBinding); ok {
 			if len(opt.([]types.PortBinding)) > 0 {
-				logrus.Warnf("%s driver does not support port mappings", macvlanType)
+				logrus.Warnf("macvlan driver does not support port mappings")
 			}
 		}
 	}
@@ -55,7 +53,7 @@ func (d *driver) CreateEndpoint(nid, eid string, ifInfo driverapi.InterfaceInfo,
 	if opt, ok := epOptions[netlabel.ExposedPorts]; ok {
 		if _, ok := opt.([]types.TransportPort); ok {
 			if len(opt.([]types.TransportPort)) > 0 {
-				logrus.Warnf("%s driver does not support port exposures", macvlanType)
+				logrus.Warnf("macvlan driver does not support port exposures")
 			}
 		}
 	}
@@ -71,7 +69,6 @@ func (d *driver) CreateEndpoint(nid, eid string, ifInfo driverapi.InterfaceInfo,
 
 // DeleteEndpoint removes the endpoint and associated netlink interface
 func (d *driver) DeleteEndpoint(nid, eid string) error {
-	defer osl.InitOSContext()()
 	if err := validateID(nid, eid); err != nil {
 		return err
 	}

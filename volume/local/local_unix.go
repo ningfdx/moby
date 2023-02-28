@@ -143,10 +143,7 @@ func (v *localVolume) postMount() error {
 	}
 	if v.opts.Quota.Size > 0 {
 		if v.quotaCtl != nil {
-			err := v.quotaCtl.SetQuota(v.path, v.opts.Quota)
-			if err != nil {
-				return err
-			}
+			return v.quotaCtl.SetQuota(v.path, v.opts.Quota)
 		} else {
 			return errors.New("size quota requested for volume but no quota support")
 		}
@@ -167,7 +164,7 @@ func (v *localVolume) unmount() error {
 }
 
 func (v *localVolume) CreatedAt() (time.Time, error) {
-	fileInfo, err := os.Stat(v.path)
+	fileInfo, err := os.Stat(v.rootPath)
 	if err != nil {
 		return time.Time{}, err
 	}

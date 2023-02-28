@@ -9,23 +9,19 @@ import (
 )
 
 func TestBoltdbBackend(t *testing.T) {
-	defer os.Remove(datastore.DefaultScopes("")[datastore.LocalScope].Client.Address)
+	defer os.Remove(datastore.DefaultScope("").Client.Address)
 	testLocalBackend(t, "", "", nil)
 	defer os.Remove("/tmp/boltdb.db")
 	config := &store.Config{Bucket: "testBackend"}
 	testLocalBackend(t, "boltdb", "/tmp/boltdb.db", config)
-
 }
 
 func TestNoPersist(t *testing.T) {
-	cfgOptions, err := OptionBoltdbWithRandomDBFile()
-	if err != nil {
-		t.Fatalf("Error creating random boltdb file : %v", err)
-	}
-	ctrl, err := New(cfgOptions...)
+	ctrl, err := New(OptionBoltdbWithRandomDBFile(t))
 	if err != nil {
 		t.Fatalf("Error new controller: %v", err)
 	}
+	defer ctrl.Stop()
 	nw, err := ctrl.NewNetwork("host", "host", "", NetworkOptionPersist(false))
 	if err != nil {
 		t.Fatalf("Error creating default \"host\" network: %v", err)
@@ -34,7 +30,7 @@ func TestNoPersist(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Error creating endpoint: %v", err)
 	}
-	store := ctrl.(*controller).getStore(datastore.LocalScope).KVStore()
+	store := ctrl.getStore().KVStore()
 	if exists, _ := store.Exists(datastore.Key(datastore.NetworkKeyPrefix, nw.ID())); exists {
 		t.Fatalf("Network with persist=false should not be stored in KV Store")
 	}

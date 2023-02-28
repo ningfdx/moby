@@ -50,7 +50,7 @@ func (daemon *Daemon) NetworkControllerEnabled() bool {
 }
 
 // NetworkController returns the network controller created by the daemon.
-func (daemon *Daemon) NetworkController() libnetwork.NetworkController {
+func (daemon *Daemon) NetworkController() *libnetwork.Controller {
 	return daemon.netController
 }
 
@@ -108,7 +108,7 @@ func (daemon *Daemon) GetNetworkByName(name string) (libnetwork.Network, error) 
 		return nil, libnetwork.ErrNoSuchNetwork(name)
 	}
 	if name == "" {
-		name = c.Config().Daemon.DefaultNetwork
+		name = c.Config().DefaultNetwork
 	}
 	return c.NetworkByName(name)
 }
@@ -283,11 +283,7 @@ func (daemon *Daemon) CreateManagedNetwork(create clustertypes.NetworkCreateRequ
 
 // CreateNetwork creates a network with the given name, driver and other optional parameters
 func (daemon *Daemon) CreateNetwork(create types.NetworkCreateRequest) (*types.NetworkCreateResponse, error) {
-	resp, err := daemon.createNetwork(create, "", false)
-	if err != nil {
-		return nil, err
-	}
-	return resp, err
+	return daemon.createNetwork(create, "", false)
 }
 
 func (daemon *Daemon) createNetwork(create types.NetworkCreateRequest, id string, agent bool) (*types.NetworkCreateResponse, error) {
@@ -316,7 +312,7 @@ func (daemon *Daemon) createNetwork(create types.NetworkCreateRequest, id string
 	c := daemon.netController
 	driver := create.Driver
 	if driver == "" {
-		driver = c.Config().Daemon.DefaultDriver
+		driver = c.Config().DefaultDriver
 	}
 
 	nwOptions := []libnetwork.NetworkOption{
@@ -356,7 +352,7 @@ func (daemon *Daemon) createNetwork(create types.NetworkCreateRequest, id string
 	if agent && driver == "overlay" {
 		nodeIP, exists := daemon.GetAttachmentStore().GetIPForNetwork(id)
 		if !exists {
-			return nil, fmt.Errorf("Failed to find a load balancer IP to use for network: %v", id)
+			return nil, fmt.Errorf("failed to find a load balancer IP to use for network: %v", id)
 		}
 
 		nwOptions = append(nwOptions, libnetwork.NetworkOptionLBEndpoint(nodeIP))
@@ -364,8 +360,8 @@ func (daemon *Daemon) createNetwork(create types.NetworkCreateRequest, id string
 
 	n, err := c.NewNetwork(driver, create.Name, id, nwOptions...)
 	if err != nil {
-		if _, ok := err.(libnetwork.ErrDataStoreNotInitialized); ok {
-			//nolint: golint
+		if errors.Is(err, libnetwork.ErrDataStoreNotInitialized) {
+			//nolint: revive
 			return nil, errors.New("This node is not a swarm manager. Use \"docker swarm init\" or \"docker swarm join\" to connect this node to swarm and try again.")
 		}
 		return nil, err
@@ -786,7 +782,7 @@ func (daemon *Daemon) clearAttachableNetworks() {
 }
 
 // buildCreateEndpointOptions builds endpoint options from a given network.
-func buildCreateEndpointOptions(c *container.Container, n libnetwork.Network, epConfig *network.EndpointSettings, sb libnetwork.Sandbox, daemonDNS []string) ([]libnetwork.EndpointOption, error) {
+func buildCreateEndpointOptions(c *container.Container, n libnetwork.Network, epConfig *network.EndpointSettings, sb *libnetwork.Sandbox, daemonDNS []string) ([]libnetwork.EndpointOption, error) {
 	var (
 		bindings      = make(nat.PortMap)
 		pbList        []networktypes.PortBinding
@@ -815,7 +811,6 @@ func buildCreateEndpointOptions(c *container.Container, n libnetwork.Network, ep
 					return nil, errors.Errorf("Invalid link-local IP address: %s", ipam.LinkLocalIPs)
 				}
 				ipList = append(ipList, linkip)
-
 			}
 
 			if ip = net.ParseIP(ipam.IPv4Address); ip == nil && ipam.IPv4Address != "" {
@@ -828,7 +823,6 @@ func buildCreateEndpointOptions(c *container.Container, n libnetwork.Network, ep
 
 			createOptions = append(createOptions,
 				libnetwork.CreateOptionIpam(ip, ip6, ipList, nil))
-
 		}
 
 		for _, alias := range epConfig.Aliases {
@@ -882,11 +876,10 @@ func buildCreateEndpointOptions(c *container.Container, n libnetwork.Network, ep
 
 			createOptions = append(createOptions, libnetwork.EndpointOptionGeneric(genericOption))
 		}
-
 	}
 
 	// Port-mapping rules belong to the container & applicable only to non-internal networks
-	portmaps := getSandboxPortMapInfo(sb)
+	portmaps := getPortMapInfo(sb)
 	if n.Info().Internal() || len(portmaps) > 0 {
 		return createOptions, nil
 	}
@@ -960,8 +953,8 @@ func buildCreateEndpointOptions(c *container.Container, n libnetwork.Network, ep
 	return createOptions, nil
 }
 
-// getSandboxPortMapInfo retrieves the current port-mapping programmed for the given sandbox
-func getSandboxPortMapInfo(sb libnetwork.Sandbox) nat.PortMap {
+// getPortMapInfo retrieves the current port-mapping programmed for the given sandbox
+func getPortMapInfo(sb *libnetwork.Sandbox) nat.PortMap {
 	pm := nat.PortMap{}
 	if sb == nil {
 		return pm
@@ -976,7 +969,7 @@ func getSandboxPortMapInfo(sb libnetwork.Sandbox) nat.PortMap {
 	return pm
 }
 
-func getEndpointPortMapInfo(ep libnetwork.Endpoint) (nat.PortMap, error) {
+func getEndpointPortMapInfo(ep *libnetwork.Endpoint) (nat.PortMap, error) {
 	pm := nat.PortMap{}
 	driverInfo, err := ep.DriverInfo()
 	if err != nil {
@@ -1020,7 +1013,7 @@ func getEndpointPortMapInfo(ep libnetwork.Endpoint) (nat.PortMap, error) {
 }
 
 // buildEndpointInfo sets endpoint-related fields on container.NetworkSettings based on the provided network and endpoint.
-func buildEndpointInfo(networkSettings *internalnetwork.Settings, n libnetwork.Network, ep libnetwork.Endpoint) error {
+func buildEndpointInfo(networkSettings *internalnetwork.Settings, n libnetwork.Network, ep *libnetwork.Endpoint) error {
 	if ep == nil {
 		return errors.New("endpoint cannot be nil")
 	}

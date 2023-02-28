@@ -12,16 +12,19 @@ import (
 )
 
 func defaultOptions(t *testing.T, configFile string) *daemonOptions {
-	opts := newDaemonOptions(&config.Config{})
+	cfg, err := config.New()
+	assert.NilError(t, err)
+	opts := newDaemonOptions(cfg)
 	opts.flags = &pflag.FlagSet{}
 	opts.installFlags(opts.flags)
-	if err := installConfigFlags(opts.daemonConfig, opts.flags); err != nil {
-		t.Fatal(err)
-	}
+	err = installConfigFlags(opts.daemonConfig, opts.flags)
+	assert.NilError(t, err)
 	defaultDaemonConfigFile, err := getDefaultDaemonConfigFile()
 	assert.NilError(t, err)
 	opts.flags.StringVar(&opts.configFile, "config-file", defaultDaemonConfigFile, "")
 	opts.configFile = configFile
+	err = opts.flags.Parse([]string{})
+	assert.NilError(t, err)
 	return opts
 }
 
@@ -45,7 +48,7 @@ func TestLoadDaemonCliConfigWithTLS(t *testing.T) {
 	loadedConfig, err := loadDaemonCliConfig(opts)
 	assert.NilError(t, err)
 	assert.Assert(t, loadedConfig != nil)
-	assert.Check(t, is.Equal("/tmp/ca.pem", loadedConfig.CommonTLSOptions.CAFile))
+	assert.Check(t, is.Equal("/tmp/ca.pem", loadedConfig.TLSOptions.CAFile))
 }
 
 func TestLoadDaemonCliConfigWithConflicts(t *testing.T) {
@@ -161,7 +164,7 @@ func TestLoadDaemonConfigWithEmbeddedOptions(t *testing.T) {
 	loadedConfig, err := loadDaemonCliConfig(opts)
 	assert.NilError(t, err)
 	assert.Assert(t, loadedConfig != nil)
-	assert.Check(t, is.Equal("/etc/certs/ca.pem", loadedConfig.CommonTLSOptions.CAFile))
+	assert.Check(t, is.Equal("/etc/certs/ca.pem", loadedConfig.TLSOptions.CAFile))
 	assert.Check(t, is.Equal("syslog", loadedConfig.LogConfig.Type))
 }
 
