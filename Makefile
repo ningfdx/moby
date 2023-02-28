@@ -151,7 +151,7 @@ all: build ## validate all checks, build linux binaries, run all tests,\ncross b
 
 binary: bundles ## build statically linked linux binaries
 	echo $(VERSION_AUTOGEN_ARGS)
-	echo "last version: dockerd-20.10.17-umd17"
+	echo "last version: dockerd-20.10.23-umd17"
 	echo $(VERSION)
 	$(BAKE_CMD) binary
 
