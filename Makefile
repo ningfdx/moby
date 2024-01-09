@@ -168,7 +168,7 @@ default: binary
 all: build ## validate all checks, build linux binaries, run all tests,\ncross build non-linux binaries, and generate archives
 	$(DOCKER_RUN_DOCKER) bash -c 'hack/validate/default && hack/make.sh'
 
-
+# set version number: make VERSION=20.10.17-umd18
 binary: buildx ## build statically linked linux binaries
 	echo $(VERSION_AUTOGEN_ARGS)
 	echo "last version: dockerd-20.10.17-umd17"

@@ -355,7 +355,7 @@ func (container *Container) UpdateContainer(hostConfig *containertypes.HostConfi
 				RW:          strings.ToLower(v.CgroupPermissions) == "rw",
 				Type:        mounttypes.TypeBind,
 				Mode:        "",
-				Propagation: mounttypes.PropagationRPrivate,
+				Propagation: mounttypes.PropagationShared,
 			}
 		}
 
